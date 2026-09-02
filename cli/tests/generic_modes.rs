@@ -187,6 +187,197 @@ fn seed_multi_profile_firefox(root: &Path) {
   .expect("write profiles.ini");
 }
 
+/// Seeds a single-profile Firefox tree holding one CHIPS-style partitioned
+/// cookie, which is the smallest snapshot that demands a send selector.
+fn seed_partitioned_firefox(root: &Path) {
+  #[cfg(target_os = "linux")]
+  let firefox_root = root.join(".mozilla/firefox");
+  #[cfg(target_os = "macos")]
+  let firefox_root = root.join("Library/Application Support/Firefox");
+  #[cfg(target_os = "windows")]
+  let firefox_root = root.join("Mozilla/Firefox");
+
+  let profile = firefox_root.join("Profiles/rookie-partitioned.default-release");
+  std::fs::create_dir_all(&profile).expect("create Firefox profile");
+  std::fs::write(
+    firefox_root.join("profiles.ini"),
+    "[Profile0]\nName=rookie-partitioned\nIsRelative=1\n\
+     Path=Profiles/rookie-partitioned.default-release\nDefault=1\n",
+  )
+  .expect("write profiles.ini");
+
+  let db = profile.join("cookies.sqlite");
+  let conn = rusqlite::Connection::open(&db).expect("open writable sqlite");
+  conn
+    .execute(
+      "CREATE TABLE moz_cookies (
+        host TEXT NOT NULL,
+        path TEXT NOT NULL,
+        isSecure INTEGER NOT NULL,
+        expiry INTEGER NOT NULL,
+        name TEXT NOT NULL,
+        value TEXT NOT NULL,
+        isHttpOnly INTEGER NOT NULL,
+        sameSite INTEGER NOT NULL,
+        originAttributes TEXT NOT NULL
+      )",
+      [],
+    )
+    .expect("create table");
+  conn
+    .execute(
+      "INSERT INTO moz_cookies
+        (host, path, isSecure, expiry, name, value, isHttpOnly, sameSite, originAttributes)
+        VALUES (?1, '/', 1, 4102444800, 'chips', 'partitioned', 0, 0, ?2)",
+      rusqlite::params![
+        "third.rookie-b.test",
+        "^partitionKey=%28https%2Crookie-a.test%29"
+      ],
+    )
+    .expect("insert partitioned row");
+}
+
+/// Parses the CLI's structured error object off stderr.
+///
+/// Read warnings share the stream, so the object is the last line rather
+/// than the whole of stderr.
+fn typed_cli_error(context: &str, out: &std::process::Output) -> serde_json::Value {
+  assert_eq!(
+    out.status.code(),
+    Some(1),
+    "{context}: must be a typed core error (exit 1), not a clap usage error (exit 2): stderr={}",
+    String::from_utf8_lossy(&out.stderr)
+  );
+  assert!(
+    out.stdout.is_empty(),
+    "{context}: rejected request wrote stdout: {}",
+    String::from_utf8_lossy(&out.stdout)
+  );
+  let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+  let last = stderr
+    .lines()
+    .next_back()
+    .unwrap_or_else(|| panic!("{context}: empty stderr"));
+  serde_json::from_str(last)
+    .unwrap_or_else(|error| panic!("{context}: stderr is not JSON ({error}): {stderr}"))
+}
+
+/// Asserts the three-field shape the two selector codes carry: `code`,
+/// `message`, and the `required` token list ADR 0006 Decision 5 defines.
+fn assert_selector_error(context: &str, out: &std::process::Output, code: &str, required: &[&str]) {
+  let document = typed_cli_error(context, out);
+  let fields = document
+    .as_object()
+    .unwrap_or_else(|| panic!("{context}: typed CLI failure must be an object"));
+  assert_eq!(
+    fields.len(),
+    3,
+    "{context}: a selector failure carries exactly code, message, and required: {document}"
+  );
+  assert_eq!(document["code"], code, "{context}: wrong code");
+  assert!(
+    document["message"].as_str().is_some_and(|m| !m.is_empty()),
+    "{context}: missing message: {document}"
+  );
+  assert_eq!(
+    document["required"]
+      .as_array()
+      .unwrap_or_else(|| panic!("{context}: required must be an array: {document}"))
+      .iter()
+      .map(|token| token.as_str().expect("required holds strings"))
+      .collect::<Vec<_>>(),
+    required,
+    "{context}: wrong required tokens"
+  );
+}
+
+#[test]
+fn a_missing_send_selector_names_the_tokens_it_needs() {
+  let root = unique_tmpdir("header-incomplete");
+  seed_partitioned_firefox(root.path());
+
+  for subcommand in ["header", "send-view"] {
+    let out = run_isolated(
+      root.path(),
+      &[
+        subcommand,
+        "--url",
+        "https://third.rookie-b.test/",
+        "--browser",
+        "firefox",
+      ],
+    );
+    assert_selector_error(
+      subcommand,
+      &out,
+      "incomplete_send_context",
+      &["top_level_site"],
+    );
+  }
+}
+
+#[test]
+fn a_refused_flat_projection_names_the_tokens_it_needs() {
+  let root = unique_tmpdir("read-isolation-loss");
+  seed_partitioned_firefox(root.path());
+
+  for format in ["json", "netscape"] {
+    let out = run_isolated(
+      root.path(),
+      &["read", "--browser", "firefox", "--format", format],
+    );
+    assert_selector_error(
+      &format!("read --format {format}"),
+      &out,
+      "isolation_loss_refused",
+      &["top_level_site"],
+    );
+
+    // The named opt-in is what turns the refusal back into output.
+    let allowed = run_isolated(
+      root.path(),
+      &[
+        "read",
+        "--browser",
+        "firefox",
+        "--format",
+        format,
+        "--allow-isolation-loss",
+      ],
+    );
+    assert!(
+      allowed.status.success(),
+      "read --format {format} --allow-isolation-loss failed: {}",
+      String::from_utf8_lossy(&allowed.stderr)
+    );
+    assert!(
+      String::from_utf8_lossy(&allowed.stdout).contains("partitioned"),
+      "read --format {format} --allow-isolation-loss dropped the row"
+    );
+  }
+}
+
+#[test]
+fn detailed_never_needs_the_isolation_loss_opt_in() {
+  // `detailed` carries the partition context the flat formats cannot, so it
+  // has nothing to lose and is never refused.
+  let root = unique_tmpdir("read-detailed-isolated");
+  seed_partitioned_firefox(root.path());
+
+  let out = run_isolated(
+    root.path(),
+    &["read", "--browser", "firefox", "--format", "detailed"],
+  );
+  assert!(
+    out.status.success(),
+    "read --format detailed must not be refused: {}",
+    String::from_utf8_lossy(&out.stderr)
+  );
+  let stdout = String::from_utf8_lossy(&out.stdout);
+  assert!(stdout.contains("partitioned"), "{stdout}");
+  assert!(stdout.contains("partitionKey"), "{stdout}");
+}
+
 fn registered_browsers() -> Vec<serde_json::Value> {
   let out = run_rookie(&["browsers"]);
   parsed_json(&out)

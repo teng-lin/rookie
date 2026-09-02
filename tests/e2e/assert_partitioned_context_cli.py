@@ -15,9 +15,20 @@ from assert_partitioned_context import ContextAssertionError, validate_context_s
 
 
 class CliHeaderError(RuntimeError):
-    def __init__(self, message: str, code: str | None = None):
+    def __init__(
+        self,
+        message: str,
+        code: str | None = None,
+        required: list[str] | None = None,
+    ):
         super().__init__(message)
         self.code = code
+        # The selector tokens the call is missing. The CLI defines `required`
+        # for exactly `incomplete_send_context` and `isolation_loss_refused`,
+        # drawing on the same vocabulary the Python and Node bindings expose,
+        # so a caller that already branches on one binding's `required` reads
+        # this one unchanged. `None` for every other code.
+        self.required = required
 
 
 class CliSnapshot:
@@ -67,6 +78,7 @@ class CliSnapshot:
         if completed.returncode != 0:
             details = completed.stderr.strip() or completed.stdout.strip()
             code = None
+            required = None
             for line in reversed(details.splitlines()):
                 try:
                     error = json.loads(line)
@@ -74,8 +86,22 @@ class CliSnapshot:
                     continue
                 if isinstance(error, dict) and isinstance(error.get("code"), str):
                     code = error["code"]
+                    # An error object always carries `code` and `message`; a
+                    # code may add documented fields, and unknown keys are
+                    # ignored rather than rejected, so `required` is read
+                    # only when the code defines it.
+                    tokens = error.get("required")
+                    if isinstance(tokens, list) and all(
+                        isinstance(token, str) for token in tokens
+                    ):
+                        required = tokens
                     break
-            raise CliHeaderError(details, code)
+            if code == "incomplete_send_context" and not required:
+                raise CliHeaderError(
+                    f"incomplete_send_context must name the selectors it needs: {details}",
+                    code,
+                )
+            raise CliHeaderError(details, code, required)
         return completed.stdout.strip()
 
 

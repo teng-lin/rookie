@@ -606,6 +606,7 @@ fn help_and_version_are_successful_stdout_contracts() {
     "read",
     "from-path",
     "header",
+    "send-view",
     "report",
     "profiles",
     "browsers",
@@ -639,6 +640,61 @@ fn help_and_version_are_successful_stdout_contracts() {
     !from_path_help_stdout.contains("--key-path"),
     "from-path help must not offer the removed --key-path alias: {from_path_help_stdout}"
   );
+
+  // The fail-closed flat formats: both snapshot jobs must advertise the
+  // named opt-in, because a script hitting `isolation_loss_refused` has no
+  // other way to discover it.
+  for subcommand in ["read", "from-path"] {
+    let help = run_rookie(&[subcommand, "--help"]);
+    assert_success(&help);
+    let stdout = String::from_utf8(help.stdout).expect("utf-8 help");
+    assert!(
+      stdout.contains("--allow-isolation-loss"),
+      "{subcommand} help omitted --allow-isolation-loss: {stdout}"
+    );
+  }
+
+  // `header` and `send-view` share one flat selector (ADR 0006 Decision 1),
+  // so the same flag list must appear under both -- a selector offered by
+  // only one of them is a selector a caller cannot use consistently.
+  for subcommand in ["header", "send-view"] {
+    let help = run_rookie(&[subcommand, "--help"]);
+    assert_success(&help);
+    let stdout = String::from_utf8(help.stdout).expect("utf-8 help");
+    for flag in [
+      "--url",
+      "--top-level-site",
+      "--resource",
+      "--method",
+      "--user-context-id",
+      "--private-browsing-id",
+      "--ancestor-chain",
+      "--first-party-domain",
+      "--gecko-view-session-context-id",
+      "--origin-attributes",
+      "--now",
+      "--browser",
+      "--profile",
+      "--include-session",
+      "--timeout-secs",
+      "--app-bound",
+    ] {
+      assert!(
+        stdout.contains(flag),
+        "{subcommand} help omitted {flag}: {stdout}"
+      );
+    }
+    for value in ["same-site", "cross-site"] {
+      assert!(
+        stdout.contains(value),
+        "{subcommand} help omitted the --ancestor-chain value {value}: {stdout}"
+      );
+    }
+    assert!(
+      !stdout.contains("--allow-isolation-loss"),
+      "{subcommand} selects a context rather than flattening one; it must not offer the opt-in: {stdout}"
+    );
+  }
 
   let version = run_rookie(&["--version"]);
   assert_success(&version);
