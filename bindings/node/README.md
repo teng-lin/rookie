@@ -76,8 +76,9 @@ and will break in a later major version. Prefer `read` / `jar` for new code.
 
 ## Isolation: detailed cookies and the header view
 
-`snapshot.cookies` is the legacy eight-field projection, which merges every
-partition/container of a domain into one answer. `snapshot.detailedCookies`
+`snapshot.cookies` is the legacy eight-field projection, which discards the
+partition/container identity of every cookie in the domain, collapsing them
+into one answer. `snapshot.detailedCookies`
 keeps that identity instead: the same eight `Cookie` fields plus a `context`
 object (`topFrameSiteKey`, `hasCrossSiteAncestor`, `sourceScheme`,
 `sourcePort`, `isPersistent`, `originAttributes`, `userContextId`,

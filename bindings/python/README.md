@@ -38,9 +38,13 @@ header = cookies.read(browser="chrome", profile="Default").header(
 )
 ```
 
-`jar` is `read(...).as_jar()`. `read` never URL-filters; `http.cookiejar` owns
-send-match. There is **no** module-level `header()` — call
-`ReadResult.header(...)` on a snapshot you already took.
+`jar` is `read(...).as_jar()`. `read` never URL-filters, and `http.cookiejar`
+cannot own send-match for a Chromium CHIPS partition or a Firefox container
+cookie — no field in it can carry that identity through. `ReadResult.header`
+(and, planned for 0.7, `send_view`; see [ADR
+0006](https://github.com/teng-lin/rookie-cookies/blob/main/docs/adr/0006-isolation-safe-send-selection-and-explicit-isolation-loss.md))
+is where isolation-aware send-match happens. There is **no** module-level
+`header()` — call `ReadResult.header(...)` on a snapshot you already took.
 
 - No-profile `read(browser="chrome")` matches `chrome()` (persistent /
   legacy-eligible cookies).
@@ -60,7 +64,7 @@ in a later major version. Prefer `read` / `jar` for new code.
 
 ## Isolation-aware cookies
 
-`ReadResult.as_list()` / `.cookies()` return the frozen eight-field
+`ReadResult.as_list()` returns the frozen eight-field
 compatibility projection, which cannot represent a Chromium CHIPS partition
 key or a Firefox Multi-Account Containers identity. `detailed_cookies()`
 returns the native, isolation-intact records instead:

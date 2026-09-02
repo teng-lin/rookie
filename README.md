@@ -57,7 +57,7 @@ at Chrome's legacy `v10`/DPAPI cookies. Checked against source on 2026-08-22:
 | Linux KWallet-corruption empty-key fallback | ✓ | ✗ | not implemented | — | ✓ | ✓ |
 | Output | structured report with typed issue taxonomy, jar, or list | dict / dataclass list | cookie objects / CLI formats | cookiejar / curl / header formats | `CookieJar`; failed rows silently dropped | CSV/JSON/db file dump via CLI; no structured issue taxonomy |
 | Testing rigor | 34 real-browser CI combinations, 3 fuzz targets, scheduled OSV scans | ~623 lines of tests, no fuzzing, no browser-matrix CI | 82 test files, no fuzzing, no browser-matrix CI | no fuzzing or hardening signal observed | unit tests folded into yt-dlp's larger suite, no browser-matrix CI | CI + codecov, no fuzzing or real-browser E2E |
-| CHIPS partition / Firefox container identity* | ✓ captured and preserved through `read()`/`DetailedCookie`; only the `jar()`/`cookies()` compatibility projection discards it | not implemented | not implemented | not implemented | not implemented | not implemented |
+| CHIPS partition / Firefox container identity* | ✓ captured and preserved through `read()`/`DetailedCookie`; only the compatibility projection (Rust `jar()`/`cookies()`, Python `as_jar()`/`as_list()`, Node `jar`/`cookies`) discards it | not implemented | not implemented | not implemented | not implemented | not implemented |
 
 \* CHIPS partitions a cookie by the top-level site that embedded it, so the
 same third-party cookie doesn't leak across unrelated sites; Firefox

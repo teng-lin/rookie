@@ -6,13 +6,13 @@
 - **Workspace:** repository root
 - **Crate:** `rookie-cookies` at `rookie-rs/` (workspace metadata is authoritative for the current version)
 - **Kind:** descriptive map of the system as it exists today, not a proposal for a new feature
-- **Does not amend:** ADR 0001–0005, `rookie-rs/public-api/*.txt`, `schema/report-dto.schema.json`, `rookie-rs/browser_registry.json`
+- **Does not amend:** ADR 0001–0006, `rookie-rs/public-api/*.txt`, `schema/report-dto.schema.json`, `rookie-rs/browser_registry.json`
 
 ---
 
 ## Overview
 
-`rookie-cookies` extracts cookies from local browser profiles on Linux, macOS, and Windows. A Rust core (`rookie-rs`) owns discovery, acquisition, decryption, and projection. Python (PyO3) and Node (napi-rs) bindings plus a CLI wrap that core. The recommended 0.6 job is `read`, with warning-discarding `jar` projection sugar in Rust, Python, and Node; named helpers such as `chrome()` and `load()` remain a compatibility bridge, not a promise.
+`rookie-cookies` extracts cookies from local browser profiles on Linux, macOS, and Windows. A Rust core (`rookie-rs`) owns discovery, acquisition, decryption, and projection. Python (PyO3) and Node (napi-rs) bindings plus a CLI wrap that core. The recommended 0.6 job is `read`, with `jar` projection sugar in Rust, Python, and Node — planned for 0.7 (ADR 0006), `jar` fails closed on a snapshot holding isolated cookies unless the caller opts in; named helpers such as `chrome()` and `load()` remain a compatibility bridge, not a promise.
 
 Internally, extraction is one pipeline with compiler-enforced stage types. Discovery returns `SourceCandidate`; reading a candidate returns `Source`; `Outcome::finalize` is the last shared result; `ExtractionReport`, `Vec<Cookie>`, and `ReadResult` are projections of that result. There is no engine-plugin trait. Four `match` arms on `RegisteredBrowser.engine` (`"chromium" | "gecko" | "safari" | "internet_explorer"`) are the accepted composition.
 
@@ -1563,7 +1563,7 @@ These are alternatives **already recorded** in ADRs, not new hypotheticals.
 
 ### 4. URL-filtered snapshot / top-level `get` / crate-root `report`
 
-**Rejected by ADR 0004.** Every `read` / `from_path` snapshot is unfiltered. The consuming HTTP client owns send-match; the Python standard-library jar can perform it directly, while Node/Rust `jar` returns flat records for the caller's client or cookie-store library. `header(&SendContext)` is a view. No top-level binding `header()`, no crate-root `fn get` / `fn report`.
+**Rejected by ADR 0004.** Every `read` / `from_path` snapshot is unfiltered. `header(&SendContext)` — and, planned for 0.7, `send_view` (ADR 0006) — owns isolation-aware send-match; no consuming HTTP client format (a bare URL, the Python standard-library jar, or Node/Rust flat `jar` records) can own it for a Chromium CHIPS partition or Firefox container cookie, since none of those formats has a field to carry that identity through. No top-level binding `header()`, no crate-root `fn get` / `fn report`.
 
 ### 5. Engine-plugin trait over Chromium / Gecko / Safari / IE
 
@@ -1704,8 +1704,10 @@ Only decisions and deferred work already recorded in ADRs or code. Not product b
 - [ADR 0003](adr/0003-unified-profile-query.md) — one profile resolver
 - [ADR 0004](adr/0004-read-is-the-recommended-entry.md) — `read` / snapshot / `header` view / source-policy asymmetry
 - [ADR 0005](adr/0005-stage-boundary-types-and-extraction-vocabulary.md) — stage types, vocabulary, module ownership, fence
+- [ADR 0006](adr/0006-isolation-safe-send-selection-and-explicit-isolation-loss.md) — isolation-safe send selector, `send_view`, fail-closed jar (0.7, in progress)
 - [Stage-boundary program record](design/stage-boundary-refactor.md) — historical motivation, review reasoning, and PR plan; its progress/line references are preserved rather than maintained
 - [After the type program](design/after-the-type-program.md) — historical follow-up audit; [Language](design/after-the-type-program.md#language) informed this document's catalog, but the current-state names here win
+- [Isolation-safe send selection program record](design/isolation-safe-send-selection.md) — active program record for ADR 0006; engine encoding tables, per-language signatures, corpus and e2e plan, PR checklist
 - [Security](security.md)
 - [Testing](testing.md) · [Building](building.md) · [Troubleshooting](troubleshooting.md)
 - `rookie-rs/src/lib.rs`, `read.rs`, `browser/{source,outcome,registry,report_core,report_build,compatibility,legacy,unseal,cookie_record}.rs`
@@ -1726,7 +1728,7 @@ Map of **existing** decisions. Not new ones.
 
 3. **One profile resolver (ADR 0003).** Unique match against opaque id, display name, directory name, non-lossy path (and persistent DB path). Ambiguous / empty / lossy are request errors. CLI profile selection exists only on `read` and browser-scoped `report` jobs.
 
-4. **`read` is the recommended entry (ADR 0004).** Snapshots are unfiltered. `header(&SendContext)` is a view. Rust, Python, and Node expose warning-discarding `jar` projection sugar over `read`. Session policy is orthogonal to profile selection (Decision 7, amended in 0.6.0): neither route goes through the report flatten any more; `SessionPolicy` (`include_session()`, default `PersistentOnly`) answers whether the session store is opened, independent of whether a profile was named. No crate-root `get` / `report`.
+4. **`read` is the recommended entry (ADR 0004).** Snapshots are unfiltered. `header(&SendContext)` is a view, and it owns isolation-aware send-match rather than the consuming HTTP client — planned for 0.7 (ADR 0006), it renders from a single `send_view` selection operation Rust, Python, Node, and the CLI all delegate to. Rust, Python, and Node expose a `jar` projection over `read`; planned for 0.7 (ADR 0006), `jar` fails closed on a snapshot holding isolated cookies unless the caller explicitly opts into the loss. Session policy is orthogonal to profile selection (Decision 7, amended in 0.6.0): neither route goes through the report flatten any more; `SessionPolicy` (`include_session()`, default `PersistentOnly`) answers whether the session store is opened, independent of whether a profile was named. No crate-root `get` / `report`.
 
 5. **Listing values cannot hold extract data (ADR 0005 Decision 1).** `SourceCandidate` vs `Source`; `Source` embeds `origin: SourceIdentity`; `selected` / `acquisition` are constructor arguments on `Source`; `failure: Option<SourceFailure>` replaces `error` + `error_stage`. Fenced by `check-stage-boundary`.
 
