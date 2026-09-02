@@ -29,6 +29,18 @@ branches = 70.0
 lines = 90.0
 branches = 75.0
 
+# Isolation identity is the security-load-bearing comparison: every arm decides
+# whether one browsing context's cookie may be sent from another. The floors are
+# high on purpose, so a new unexercised arm shows up as a coverage failure
+# rather than as an untested way to merge two contexts.
+[files."rookie-rs/src/isolation.rs"]
+lines = 85.0
+branches = 70.0
+
+[files."rookie-rs/src/send_view.rs"]
+lines = 85.0
+branches = 70.0
+
 # ---------------------------------------------------------------------------
 # Python binding
 #

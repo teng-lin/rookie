@@ -6,6 +6,70 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `ReadResult::send_view` returns the cookies a `SendContext` selects, before
+  they are flattened into a header string. It borrows the snapshot, so the
+  selected rows keep their full `DetailedCookie` identity, and
+  `SendView::omitted` reports how many rows were left out under each of seven
+  stable reasons, in a fixed order. `header` is now a thin renderer over this
+  one operation, so no binding and no command can grow its own copy of the
+  send-match predicate.
+- `SendContext` gained four selectors: `ancestor_chain`, `first_party_domain`,
+  `gecko_view_session_context_id`, and `origin_attributes`. `AncestorChain` is
+  a new public `SameSite`/`CrossSite` enum. Without an explicit
+  `ancestor_chain` the value is derived from the request and top-level sites,
+  so an existing call site does not have to supply one; setting it is how a
+  caller describes a nested `A -> B -> A` embed, which the derivation alone
+  cannot see. The selector-token vocabulary gained `first_party_domain`,
+  `gecko_view_session_context_id`, and `origin_attributes`, appended after the
+  three tokens 0.6 defined rather than reordering them.
+- A new `unknown_ancestor_chain` read warning counts partitioned Chromium rows
+  whose store predates the `has_cross_site_ancestor` column, mirroring the
+  existing `unparsable_partition_key` warning.
+
+### Changed
+
+- `header` now matches the full partition identity both engines actually use,
+  instead of reducing each engine's key to a scheme and a host. Chromium's
+  `has_cross_site_ancestor` bit is part of the comparison, so two rows that
+  differ only by ancestor chain no longer both match one context. Firefox's
+  `partitionKey` is parsed strictly as `(scheme,host[,port][,f])`, so partitions
+  differing only by port or by the foreign-ancestor bit are distinct
+  identities, and a tuple in any other shape now matches nothing rather than
+  matching on whichever leading fields happened to parse. All five Firefox
+  `OriginAttributes` equality fields are compared, and a row carrying an
+  attribute name this build does not recognize is omitted from every send view
+  until a caller names its `origin_attributes` value verbatim.
+- Two send-match outcomes change for Firefox rows that 0.6 got wrong in
+  opposite directions. `user_context_id(0)` and `private_browsing_id(0)` now
+  select rows whose stored suffix omits the attribute, where 0.6 matched
+  nothing at all: Firefox omits a default-valued attribute, so an empty suffix
+  is a positive statement that the row is in the default container. And a
+  partitioned Firefox row is no longer sent to a first-party context, where 0.6
+  sent it: a partition is by construction not the unpartitioned default.
+- A Chromium partition key that names an explicit port is no longer matched
+  against a top-level site that does not. 0.6 stripped any trailing port from
+  the key, which was the one step in the comparison that widened it. Chromium
+  serializes a site without a port, so no key a current browser writes is
+  affected.
+- A partitioned Chromium row whose store never recorded the ancestor bit is
+  omitted from every send view rather than sent to any context whose key
+  otherwise matches. Only stores written before 2024 lack that column. The row
+  stays in the snapshot inventory, and the loss is counted both per view and as
+  a read warning, so it is visible rather than silent.
+- Same-site now means that the request host equals the top-level site's host or
+  is a subdomain of it, on the same scheme. It previously meant literal host
+  equality. A request to `www.example.com` under a `https://example.com`
+  top-level site is therefore same-site where it used to be cross-site. Sibling
+  subdomains remain cross-site, because neither is a subdomain of the other,
+  which is what keeps this sound without a public-suffix list. The rule only
+  widens what `SameSite=Lax` and `SameSite=Strict` admit; nothing that was sent
+  before is withheld now. A request is same-site only when the two sites match
+  and no ancestor is cross-site, so the new `ancestor_chain` selector set to
+  `CrossSite` withholds `Lax` and `Strict` even on a first-party URL, which is
+  how a browser treats an `A -> B -> A` frame.
+
 ### Fixed
 
 - Hosted claimed-browser cookie seeding no longer loses a run to a single
