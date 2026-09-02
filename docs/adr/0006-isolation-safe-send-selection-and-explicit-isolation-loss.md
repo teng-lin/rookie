@@ -54,22 +54,24 @@ against this tree rather than assumed from the issue text:
    `into_cookies()`), and the CLI's `--format json|netscape` all flatten to
    the eight-field compatibility shape unconditionally, with no error and no
    count. `http.cookiejar.CookieJar`, Netscape-format rows, and a flat
-   `CookieObject[]`/`Cookie[]` have no field for a Chromium CHIPS partition
-   key, a Firefox `partitionKey` tuple, or Firefox container/private-browsing
-   identity — there is no cell in any of those shapes to put that state, so
-   no encoding of it, however clever, would let a caller round-trip it back
-   into a request. A successful jar call is therefore currently
-   indistinguishable from one that dropped isolation-bound credentials into
-   an unscoped bag.
+   `CookieObject[]`/`Cookie[]` all have no field their send-match consults
+   for a Chromium CHIPS partition key, a Firefox `partitionKey` tuple, or
+   Firefox container/private-browsing identity — `http.cookiejar.Cookie` in
+   particular has a `rest` dict that could technically hold arbitrary data,
+   but nothing in its send-match logic looks at it, so stashing isolation
+   identity there would not change what gets sent. A successful jar call is
+   therefore currently indistinguishable from one that dropped
+   isolation-bound credentials into an unscoped bag.
 
 `docs/architecture_api_gap_consolidated.md`, the document issue #331 names as
 its Phase 0 target, was deleted by PR #333; the "header collapses through
 `Cookie`" claim it recorded is already absent from the README and
 `docs/architecture.md`. Phase 0 (this PR) therefore reduces to this ADR, the
 program record, and a small number of residual prose corrections that
-predate this ADR's decisions (stale `.cookies()` naming, an `http.cookiejar`
-send-match claim ADR 0004 §3 never actually made this precisely, and one
-"merges" sentence in the Node README that should say "discards").
+predate this ADR's decisions (stale `.cookies()` naming, ADR 0004 §3's own
+"the consuming HTTP client owns send-match" claim — which this ADR's
+Decision 2 supersedes — and one "merges" sentence in the Node README that
+should say "discards").
 
 ## Decision
 
@@ -100,7 +102,7 @@ disagree.
   `ancestor_chain == CrossSite` (`Some(true)` for `CrossSite`, `Some(false)`
   for `SameSite`). Port-stripping on the site key is retained: Chromium
   serializes a *site* (no port), and the origin-with-port spelling some
-  versions persist is a migrated older schema, not a second identity.
+  versions persist is not a second identity.
 - **Firefox `partitionKey`.** The tuple grammar is strict:
   `(scheme,host[,port][,f])`. Anything else — extra fields, a malformed
   bracket, a non-numeric port — is `Unparsable`, not "ignore the tail and
@@ -121,41 +123,54 @@ disagree.
 **Unknown stored value is never a default match.** A crate-internal
 `StoredIsolation`, computed once per row, parses `origin_attributes` fully:
 the five known attribute names plus a catch-all "this attribute name is
-present but this build does not know it" fact. Firefox omits
-default-valued attributes from the serialized suffix, so
-`StoredIsolation` fills `user_context_id = 0` and `private_browsing_id = 0`
-only when an `origin_attributes` value is present at all (an empty suffix
-`^` or a wholly absent one) — a row with no origin-attributes information at
-all stays genuinely unknown rather than assumed-default. A stored `None`
-(unknown) never matches a supplied selector, and a supplied selector never
-matches a stored unrecognized attribute name: an unrecognized name can only
-be reached by the exact `origin_attributes` raw-suffix selector (Decision 5),
-never inferred from the five typed fields.
+present but this build does not know it" fact. Firefox omits default-valued
+attributes from the serialized suffix, so the defaults `user_context_id = 0`
+and `private_browsing_id = 0` are filled only when an `origin_attributes`
+value is present — an empty string or a bare `^` counts as present, because
+Firefox still wrote the column; a `None` column, as on every Chromium row,
+does not, and stays genuinely unknown rather than assumed-default. A stored
+`None` (unknown) never matches a supplied selector, and a supplied selector
+never matches a stored unrecognized attribute name: an unrecognized name can
+only be reached by the exact `origin_attributes` raw-suffix selector
+(Decision 5), never inferred from the five typed fields.
 
 **Missing selector is demanded only when observed.** A token is added to
 `required` if and only if some row in the snapshot positively observes a
 non-default value for that dimension. `None` and `Some(0)` container ids
 never demand a token — that would make `header()` unusable against every
 store that lacks the column. An `Unparsable` partition key demands
-`top_level_site` (there is no other way to disambiguate it). Any
-unrecognized attribute name demands `origin_attributes`.
+`top_level_site` even though supplying it does not make the row sendable —
+the row is omitted (counted `unparsable_partition_key`) regardless of the
+selector. The demand exists so the snapshot's other, parsable partitioned
+rows are not silently sent as if the unparsable one were absent: a caller
+who has not supplied `top_level_site` at all cannot tell isolated rows apart
+from unpartitioned ones, so the demand surfaces the unparsable row's
+existence rather than letting it disappear into a context it does not
+belong to. Any unrecognized attribute name demands `origin_attributes` on
+the same logic.
 
 **Ancestor chain when the caller does not supply one.** Derived as: the
 request host equals or is a subdomain of the caller-normalized top-level
-site host, on the same scheme, is `SameSite`; otherwise `CrossSite`. An
+site host, on the same scheme, is `SameSite`; otherwise `CrossSite`. **IP
+literals are exempt from the subdomain rule.** When either the request host
+or the top-level site host is an IPv4 or IPv6 literal, site membership is
+exact host equality, never a subdomain check — an IPv6 host is compared
+without its brackets, the form `site_from_url` already normalizes to. An
 explicit `ancestor_chain` selector overrides this derivation, which is what
 lets a caller express an A→B→A embed (browser-observed same-site host,
 cross-site ancestry) that the derivation alone cannot distinguish. The same
-subdomain rule now governs `same_site_context`, the SameSite=Strict/Lax gate
-`header()` already applied before this ADR — previously a literal host
-comparison. This is the one semantic change to already-shipped SameSite
-behavior this ADR makes: a request to `www.example.com` with
-`top_level_site=https://example.com` was `CrossSite` before this ADR and is
-`SameSite` after it; two sibling subdomains (`a.example.com` embedded under
-`b.example.com`) stay `CrossSite` either way, because neither is a subdomain
-of the other. The widened case only adds matches (a same-site cookie a
-browser would send is no longer omitted); it never sends a cookie a strict
-comparison would have withheld. It replaces the retired test
+subdomain rule (with the same IP-literal exemption) now governs
+`same_site_context`, the SameSite=Strict/Lax gate `header()` already applied
+before this ADR — previously a literal host comparison. This is the one
+semantic change to already-shipped SameSite behavior this ADR makes: a
+request to `www.example.com` with `top_level_site=https://example.com` was
+`CrossSite` before this ADR and is `SameSite` after it; two sibling
+subdomains (`a.example.com` embedded under `b.example.com`) stay `CrossSite`
+either way, because neither is a subdomain of the other. The rule only
+widens: it never withholds a cookie the old literal-equality rule would have
+sent, and it only adds cookies that were previously withheld because the
+request host was a child subdomain of the top-level site rather than an
+exact match. It replaces the retired test
 `a_sibling_subdomain_is_cross_site_because_there_is_no_public_suffix_list`
 with sibling-stays-cross-site and child-becomes-same-site cases (see
 Decision 4 for why this remains sound without a public-suffix list).
@@ -182,14 +197,26 @@ Every binding's send-selecting entry point (`send_view`/`sendView`/
 through this one operation, so a collision case that passes in Rust cannot
 silently diverge in a binding that grew its own copy of the predicate.
 
-`SendOmissions` counts a fixed, ordered set of reasons a row is not sent:
+`SendOmissions` names a fixed, stable set of reasons a row is not sent:
 `expired`, `not_applicable` (fails `GetFilter`, i.e. domain/path/Secure),
 `same_site`, `partition` (isolation mismatch other than an unknown ancestor
-bit), `ancestor_chain_unknown`, `unparsable_partition_key`, and `origin`
-(Firefox origin-attributes mismatch other than partition/ancestor). Each row
-is counted under its first failing reason in that order, never double-counted.
-The order is part of the contract: it is the order `SendOmissions::entries()`
-yields, and bindings surface it verbatim rather than re-deriving it.
+bit or an unparsable key), `ancestor_chain_unknown`, `unparsable_partition_key`,
+and `origin` (Firefox origin-attributes mismatch other than
+partition/ancestor). Attribution and serialization are two different orders,
+and this ADR fixes both independently:
+
+- **Attribution order** is the row evaluation order: expired, then the
+  domain/path/Secure filter (`not_applicable`), then the isolation verdict
+  reasons (`partition` / `ancestor_chain_unknown` / `unparsable_partition_key`
+  / `origin`), then `same_site`. Each row is counted under its first failing
+  reason in this order and never double-counted — a row that is both expired
+  and cross-site is counted `expired`, not `same_site`.
+- **Serialization order** is the order above the two bullets list — the
+  stable order `SendOmissions::entries()` yields regardless of how many rows
+  landed in each bucket. Bindings surface this order verbatim rather than
+  re-deriving it. It is not the attribution order and must not be read as
+  one: `same_site` sorts before the isolation reasons in `entries()` even
+  though isolation is checked before `same_site` when a row is evaluated.
 
 ### 3. Fail-closed jar, explicit opt-in for isolation loss
 
@@ -252,11 +279,14 @@ other.
 
 The documented rule for a CLI JSON error object is: every error object
 carries `code` and `message`; a given `code` may define additional
-documented fields. `required` is defined for exactly two codes:
-`incomplete_send_context` (already shipped) and the new
-`isolation_loss_refused`. A consumer parsing CLI error JSON must ignore
-unknown keys rather than reject them, so this rule can add a field to a
-`code` in the future without breaking existing consumers.
+documented fields. Today `render_cli_error` emits only `code` and `message`
+for every code, including `incomplete_send_context` — the CLI has never
+surfaced `required` (only the Python and Node bindings do today). `required`
+is new to the CLI in this program, defined for exactly two codes:
+`incomplete_send_context` and the new `isolation_loss_refused`, both landing
+together (PR 3). A consumer parsing CLI error JSON must ignore unknown keys
+rather than reject them, so this rule can add a field to a `code` in the
+future without breaking existing consumers.
 
 ## Consequences
 
@@ -267,16 +297,21 @@ unknown keys rather than reject them, so this rule can add a field to a
   work with existing calls; its behavior changes only for the collision
   cases Decision 1 newly disambiguates (previously-merged rows now split, or
   a previously-silent-default unknown attribute now demands
-  `origin_attributes`). `jar()`/`into_jar()` change from infallible to
-  `Result`-returning — this is a breaking signature change, called out in
-  the 0.7 changelog; existing unpartitioned-snapshot callers see `Ok` exactly
-  as before. `jar_with`/`into_jar_with` and the `IsolationLoss` enum are new.
+  `origin_attributes`). `ReadResult::jar()`/`into_jar()` do not exist today —
+  today's infallible flatten is reached only via `into_cookies()`/`cookies()`
+  or the free `jar(request)` function — so these are new, `Result`-returning
+  methods, not a signature change to an existing one. The free `jar(request)`
+  function keeps its existing `Result`-returning signature and gains a new
+  failure mode (`IsolationLossRefused`); existing unpartitioned-snapshot
+  callers keep seeing `Ok` exactly as before. `jar_with`/`into_jar_with` and
+  the `IsolationLoss` enum are new. Public-API snapshots for PR 2 are
+  additions only.
 - **Python.** `ReadResult.send_view(...)` is new, returning the detailed
   selected set, header string, and omission counts. `as_jar()` and the free
   `jar()` both gain `allow_isolation_loss: bool = False`; the default keeps
   today's call sites working for unpartitioned snapshots and raises the new
   structured error otherwise. `ReadResult.compatibility_cookies(*, allow_isolation_loss=False)`
-  is the new named escape hatch that make the fail-closed/opt-in policy
+  is the new named escape hatch that makes the fail-closed/opt-in policy
   explicit without going through the jar-shaped API. `as_list()` is
   unaffected.
 - **Node.** `ReadResult.sendView(context)` is new. `jar` gains a

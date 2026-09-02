@@ -125,7 +125,7 @@ caller an explicit, named way to accept that loss.
 | `top_frame_site_key` empty/absent | Unpartitioned: sent in every top-level context |
 | `top_frame_site_key` parses to a site, `has_cross_site_ancestor` is `0`/`1` | Matches iff `site == top_level_site` and stored bit `== (ancestor_chain == CrossSite)` |
 | `top_frame_site_key` parses to a site, `has_cross_site_ancestor` is `NULL` | Never sent; counted `SendOmissions::ancestor_chain_unknown`; `ReadWarning` code `unknown_ancestor_chain` |
-| `top_frame_site_key` present but unparsable | Never sent unless the selector supplies `top_level_site` matching nothing else parses it against; counted `unparsable_partition_key` |
+| `top_frame_site_key` present but unparsable | Never sent, regardless of the selector supplied; demands `top_level_site` so the snapshot's other, parsable partitioned rows are not silently sent as if this row were absent; counted `unparsable_partition_key` |
 
 Only pre-2024 Chromium schemas lack the `has_cross_site_ancestor` column at
 all, which is the practical source of the `NULL` case above.
@@ -177,13 +177,28 @@ its `CookieContext.origin_attributes` is populated.
 | `ancestor_chain` | `Option<AncestorChain>` (new) | Never demanded — derived from `top_level_site` when absent |
 | Firefox partition port | *(no field)* | Never demanded — derived from `top_level_site`'s explicit port |
 
+The `ancestor_chain` derivation (request host equals or is a subdomain of
+the caller-normalized top-level site host, same scheme, ⇒ `SameSite`;
+otherwise `CrossSite`) has one exemption: when either host is an IPv4 or
+IPv6 literal, site membership is exact host equality, never a subdomain
+check — an IPv6 host is compared without its brackets, matching
+`site_from_url`'s existing normalization. The same exemption applies to
+`same_site_context` (ADR 0006 Decision 1).
+
 Canonical `required` order (fixed, append-only):
 `top_level_site`, `user_context_id`, `private_browsing_id`,
 `first_party_domain`, `gecko_view_session_context_id`, `origin_attributes`.
 
-`SendOmissions` count order (fixed, first-failing-reason-wins):
-`expired`, `not_applicable`, `same_site`, `partition`,
-`ancestor_chain_unknown`, `unparsable_partition_key`, `origin`.
+`SendOmissions` has two independent orders (ADR 0006 Decision 2). Attribution
+— which reason a row is counted under — follows row evaluation order:
+expired, then `not_applicable` (domain/path/Secure), then the isolation
+verdict (`partition` / `ancestor_chain_unknown` / `unparsable_partition_key`
+/ `origin`), then `same_site`; each row is counted once, under its first
+failing reason. Serialization — the order `SendOmissions::entries()` yields,
+which bindings surface verbatim — is fixed separately as: `expired`,
+`not_applicable`, `same_site`, `partition`, `ancestor_chain_unknown`,
+`unparsable_partition_key`, `origin`. The two orders disagree on where
+`same_site` sits and that is intentional, not an inconsistency to fix.
 
 ## API changes per language
 
@@ -281,9 +296,11 @@ New `send-view` subcommand: prints
 flags on `header`/`send-view`: `--ancestor-chain same-site|cross-site`,
 `--first-party-domain`, `--gecko-view-session-context-id`,
 `--origin-attributes`, `--now <epoch>`. New `--allow-isolation-loss` on
-`read`/`from-path` for `--format json|netscape`. `render_cli_error` adds
-`required` for `isolation_loss_refused` alongside the existing
-`incomplete_send_context` case.
+`read`/`from-path` for `--format json|netscape`. `render_cli_error` gains a
+`required` field — the CLI does not emit it today for any code, including
+`incomplete_send_context` — and adds it for both `incomplete_send_context`
+and the new `isolation_loss_refused`; both arms land together in PR 3, each
+with its own CLI test.
 
 ## Isolation collision corpus
 
@@ -359,7 +376,10 @@ flags on `header`/`send-view`: `--ancestor-chain same-site|cross-site`,
 - [ ] **PR 2** — Rust jar policy: `IsolationLoss`, `jar`/`into_jar`/
       `jar_with`/`into_jar_with`, `RequestError::IsolationLossRefused`.
 - [ ] **PR 3** — Isolation collision corpus, `rookie-rs/tests/isolation_corpus.rs`,
-      CLI `send-view` subcommand and selector flags, `--allow-isolation-loss`.
+      CLI `send-view` subcommand and selector flags, `--allow-isolation-loss`,
+      `render_cli_error`'s new `required` field for `incomplete_send_context`
+      and `isolation_loss_refused` (the CLI emits neither today), with a CLI
+      test for each.
 - [ ] **PR 4** — Python binding: `send_view`, `compatibility_cookies`,
       `as_jar`/`jar` opt-in kwargs, stub and typing updates.
 - [ ] **PR 5** — Node binding: `sendView`, `JarOptions.allowIsolationLoss`,

@@ -13,11 +13,12 @@ Named store verbs (`chrome()`, `load()`, two-arg Rust `browser()`) remain the co
 
 1. The recommended entry is `read`; every library language also exposes a
    `jar` projection. Python returns its standard-library `CookieJar`; Node
-   returns `CookieObject[]`; Rust returns `Vec<Cookie>`. **Amended in 0.7.0:**
-   `jar` is no longer warning-discarding sugar that always succeeds. Per
+   returns `CookieObject[]`; Rust returns `Vec<Cookie>`. **Amended for 0.7.0
+   (ADR 0006; lands with PRs 1–2):** `jar` will no longer be warning-discarding
+   sugar that always succeeds. Per
    [ADR 0006](0006-isolation-safe-send-selection-and-explicit-isolation-loss.md),
-   it fails closed with a typed error on a snapshot holding any positively
-   isolated cookie, and returns the pre-0.7.0 flattened value only when the
+   it will fail closed with a typed error on a snapshot holding any positively
+   isolated cookie, and will return today's flattened value only when the
    caller opts in explicitly or the snapshot has nothing to lose.
 2. Every `read` / `from_path` snapshot is unfiltered. URL send-match is not applied to the snapshot.
 3. `header` is a view (crate-private `GetFilter`) exposed as
@@ -27,19 +28,20 @@ Named store verbs (`chrome()`, `load()`, two-arg Rust `browser()`) remain the co
    request is made from, so `header(url)` had no way to distinguish a
    CHIPS-partitioned cookie from an unpartitioned one and merged them. A
    snapshot holding an isolated cookie now *demands* the selector that
-   identifies it. **Amended in 0.7.0:** the consuming HTTP client does not
-   own send-match for a partitioned or container-scoped cookie — no format a
-   client accepts (a bare URL, `http.cookiejar`, Netscape rows, a flat
-   `CookieObject[]`) has a field to carry that identity through. Per
+   identifies it. **Amended for 0.7.0 (ADR 0006; lands with PRs 1–2):** the
+   consuming HTTP client does not own send-match for a partitioned or
+   container-scoped cookie — no format a client accepts (a bare URL,
+   `http.cookiejar`, Netscape rows, a flat `CookieObject[]`) has a field its
+   send-match consults for that identity. Per
    [ADR 0006](0006-isolation-safe-send-selection-and-explicit-isolation-loss.md),
-   `send_view`/`sendView`/`send-view` and `header` are the operations that
-   own isolation-aware send-match, backed by one shared selection
-   implementation per language; `header` now renders from `send_view`
-   instead of matching independently. The client still owns ordinary
-   domain/path/expiry cookie-jar bookkeeping once it has a send-safe value in
-   hand.
+   `send_view`/`sendView`/`send-view` and `header` will be the operations
+   that own isolation-aware send-match, backed by one shared Rust selection
+   implementation every language calls through; `header` will render from
+   `send_view` instead of matching independently. The client still owns
+   ordinary domain/path/expiry cookie-jar bookkeeping once it has a send-safe
+   value in hand.
 4. A persistent cookie-database path is a resolver key (see ADR 0003’s query set plus this addition). `from_path` is a different universe and does not call the profile resolver.
-5. Frozen `chrome()` / `load()` / eight-field `Cookie` / no all-profile flatten stay. **Amended in 0.6.0:** `Cookie` keeps its eight fields and gains derives only; it is now a *projection* of the snapshot, whose native representation is `DetailedCookie`. "No all-profile flatten" is now a type fact rather than a rule — `ProfileSelection` cannot express it (ADR 0003). **Amended in 0.7.0:** `Cookie` is the *compatibility* projection, reachable through the infallible inventory accessors (`cookies()`/`into_cookies()`, Python `as_list()`, Node's `cookies` getter) and, for a send-safe use, only through the explicit-loss jar path (`jar_with`/`into_jar_with`, `allow_isolation_loss`) [ADR 0006](0006-isolation-safe-send-selection-and-explicit-isolation-loss.md) defines. It is never the vehicle for isolation-aware send-match.
+5. Frozen `chrome()` / `load()` / eight-field `Cookie` / no all-profile flatten stay. **Amended in 0.6.0:** `Cookie` keeps its eight fields and gains derives only; it is now a *projection* of the snapshot, whose native representation is `DetailedCookie`. "No all-profile flatten" is now a type fact rather than a rule — `ProfileSelection` cannot express it (ADR 0003). **Amended for 0.7.0 (ADR 0006; lands with PRs 1–2):** `Cookie` will become the *compatibility* projection, reachable through the infallible inventory accessors (`cookies()`/`into_cookies()`, Python `as_list()`, Node's `cookies` getter) and, for a send-safe use, only through the explicit-loss jar path (`jar_with`/`into_jar_with`, `allow_isolation_loss`) [ADR 0006](0006-isolation-safe-send-selection-and-explicit-isolation-loss.md) defines. It will no longer be a vehicle for isolation-aware send-match.
 6. Do not add crate-root `fn report` or `fn get`.
 7. **Session policy is orthogonal to profile selection.** *(Amended in 0.6.0; superseding text below.)* Both `read` routes stop at the finalized record and project `DetailedCookie`; neither goes through the report flatten. Whether the profile's declared session store is opened is a separate question, answered by `SessionPolicy` (`PersistentOnly` by default) and enforced **before lookup**, so the crate does not open `sessionstore.js` or `recovery.jsonlz4` unless asked. Session import passes `include_session()` / `include_session=True`, and no longer needs to name a profile to get it.
 
@@ -51,9 +53,10 @@ Named store verbs (`chrome()`, `load()`, two-arg Rust `browser()`) remain the co
 
 ## Consequences
 
-- Docs lead with `read(...)` plus `send_view(...)`/`header(...)`, not
-  `get(url).as_jar()`. **Amended in 0.7.0:** `jar` is documented as the
-  compatibility projection — the send-safe recommendation for a snapshot
-  that may hold isolated cookies is `send_view`/`header`, not `jar`.
+- Docs lead with `read(...)` plus `header(...)`, not `get(url).as_jar()`.
+  **Amended for 0.7.0 (ADR 0006; lands with PRs 1–2):** docs will lead with
+  `read(...)` plus `send_view(...)`/`header(...)` and will document `jar` as
+  the compatibility projection — the send-safe recommendation for a snapshot
+  that may hold isolated cookies will be `send_view`/`header`, not `jar`.
 - Callers who want session cookies pass `include_session` (0.6.0). Before 0.6.0 they passed `profile=`, which is the migration trap: `jar(profile="Default")` returns a smaller jar in 0.6.0, with no error.
 - `chrome()` remains the compatibility set; `read` is the session-importer when `include_session` is passed, with or without a profile.

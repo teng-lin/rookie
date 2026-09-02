@@ -579,7 +579,7 @@ Public counters are `u32`; wider internal counts saturate at `u32::MAX` and set 
 - `from_path`: does **not** call the profile resolver (ADR 0004). Sniffs via `direct_path::PathExtractRequest` / `detailed_from_path_inner`. Optional `ChromiumCredentialSource`. `browser_id` / `profile_id` on the result are both `None` (0.6.0 changed `browser_id` from the empty-string sentinel to `None`).
 - `profiles` is an alias of `browser_profiles`.
 
-Every library language exposes warning-discarding `jar` projection sugar over `read`: Python returns `http.cookiejar.CookieJar` through the patched `ReadResult.as_jar`; Node returns `CookieObject[]`; Rust returns `Vec<Cookie>`. Python `from_path`, Node `fromPath`, the CLI `from-path`, and Rust `FromPathRequest` all expose the same portable credential choices: plaintext only, a Unix registry browser id, or a Windows `Local State` path, with mutual exclusion and platform validation before credential I/O.
+Every library language exposes warning-discarding `jar` projection sugar over `read`: Python returns `http.cookiejar.CookieJar` through the patched `ReadResult.as_jar`; Node returns `CookieObject[]`; Rust returns `Vec<Cookie>`. Planned for 0.7 (ADR 0006), `jar` will fail closed on a snapshot holding isolated cookies unless the caller opts in, rather than warning-discarding unconditionally. Python `from_path`, Node `fromPath`, the CLI `from-path`, and Rust `FromPathRequest` all expose the same portable credential choices: plaintext only, a Unix registry browser id, or a Windows `Local State` path, with mutual exclusion and platform validation before credential I/O.
 
 #### Compatibility dispatch
 

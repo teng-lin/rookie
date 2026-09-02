@@ -40,7 +40,8 @@ header = cookies.read(browser="chrome", profile="Default").header(
 
 `jar` is `read(...).as_jar()`. `read` never URL-filters, and `http.cookiejar`
 cannot own send-match for a Chromium CHIPS partition or a Firefox container
-cookie — no field in it can carry that identity through. `ReadResult.header`
+cookie — no field its send-match consults can carry that identity through.
+`ReadResult.header`
 (and, planned for 0.7, `send_view`; see [ADR
 0006](https://github.com/teng-lin/rookie-cookies/blob/main/docs/adr/0006-isolation-safe-send-selection-and-explicit-isolation-loss.md))
 is where isolation-aware send-match happens. There is **no** module-level
