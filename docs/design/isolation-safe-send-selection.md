@@ -2,10 +2,10 @@
 
 - **Author:** maintainers
 - **Date:** 2026-09-01
-- **Status:** Active program record. PRs 0–5 are merged on
-  `worktree-issue-331`; PR 6 (e2e depth extension and the final documentation
-  sweep) is in progress. See the PR plan and acceptance mapping below for the
-  commits that carried each one.
+- **Status:** Active program record. PRs 0–5 and PR 6b (the documentation
+  consolidation) are merged on `worktree-issue-331`; PR 6a (the e2e depth
+  extension and its `browser_coverage.json` contract) is in progress. See the
+  PR plan and acceptance mapping below for the commits that carried each one.
 - **Crate/packages:** `rookie-rs`, `bindings/python` (`rookie_cookies`),
   `bindings/node` (`rookie-cookies`), `cli`
 - **Release context:** 0.7
@@ -188,7 +188,7 @@ its `CookieContext.origin_attributes` is populated.
 | `private_browsing_id` | `Option<u32>` (existing) | A row has a non-`None`, non-`Some(0)` value |
 | `first_party_domain` | `Option<String>` (new) | A row has a stored, non-empty value (the filled `""` default never demands) |
 | `gecko_view_session_context_id` | `Option<String>` (new) | A row has a stored, non-empty value (the filled `""` default never demands) |
-| `origin_attributes` | `Option<String>` (new; exact raw suffix) | A row has an unrecognized attribute name |
+| `origin_attributes` | `Option<String>` (new; exact raw suffix) | A row has an unrecognized attribute name, or an unreadable value under a known name |
 | `ancestor_chain` | `Option<AncestorChain>` (new) | Never demanded — derived from `top_level_site` when absent |
 | Firefox partition port | *(no field)* | Never demanded — derived from `top_level_site`'s explicit port |
 
@@ -418,14 +418,20 @@ introduces and splitting them would have meant shipping a half-wired
 - [x] **PR 5** — Node binding: `sendView`, `JarOptions.allowIsolationLoss`,
       generated `.d.ts`/`.js` updates. `1ec0e0b`, `0bcde24`, merged as
       `d9ee18f`.
-- [ ] **PR 6** — E2E depth extension, `browser_coverage.json` contract,
-      final docs sweep (README/architecture/testing finalization beyond the
-      PR 0 prose corrections). In progress.
+PR 6 was split along its two independent halves so the documentation sweep
+did not have to wait on a real-browser lane:
+
+- [ ] **PR 6a** — E2E depth extension and the `browser_coverage.json`
+      `send_selection` capability contract. In progress.
+- [x] **PR 6b** — Final documentation sweep: the four package READMEs,
+      `docs/architecture.md`, `docs/testing.md`, the ADR 0004/0006 status
+      wording, this record, and the consolidated `CHANGELOG.md` Unreleased
+      section. `079274e`, plus the review follow-up that landed on top of it.
 
 ## Acceptance mapping (issue #331 checklist → PR)
 
 - Docs no longer claim `header()` collapses through `Cookie` → PR 0
-  (`6f5d624`), finished by PR 6's documentation sweep.
+  (`6f5d624`), finished by PR 6b's documentation sweep (`079274e`).
 - Chromium ancestor bit gated; Firefox scheme/base domain/port/foreign bit;
   all Firefox `OriginAttributes` equality fields; unknown attributes fail
   closed → PR 1 (`4955ff5`).
@@ -439,7 +445,7 @@ introduces and splitting them would have meant shipping a half-wired
   behind opt-in → PR 2 (`c14c2ca`), CLI in PR 3b (`6eb1219`, `7770ec3`),
   Python in PR 4 (`e0a1eea`), Node in PR 5 (`1ec0e0b`).
 - Synthetic collision tests and real-browser context tests green → PR 3a
-  (`489faa8`) and PR 6.
+  (`489faa8`) for the synthetic half; the real-browser half is PR 6a.
 
 ## Open questions
 
@@ -478,7 +484,7 @@ introduces and splitting them would have meant shipping a half-wired
 - Node header errors use the sync path; the shared `binding_error_details`
   keeps both paths aligned, and PR 5 added the sync-path `required` assertion
   explicitly rather than inheriting the async path's coverage.
-- `expected_counts` literals across three e2e files (PR 6) must change
+- `expected_counts` literals across three e2e files (PR 6a) must change
   together or the lane will assert stale row counts against a real browser.
 
 ## References

@@ -193,10 +193,10 @@ a hand-authored oracle for the isolation-safe send-selection semantics ADR
 0006 defines: `corpus.json` names five synthetic stores (`chromium_isolated`,
 `chromium_plain`, `firefox_isolated`, `firefox_unknown_attr`,
 `firefox_plain`) and a set of `SendContext` cases, each with an expected
-selected set, header, and omission counts, or a structured error with its
-`code` and `required` tokens (`incomplete_send_context` or
-`isolation_loss_refused`), plus a per-store `jar` verdict covering both the
-refusal and the byte-identity of the opted-in output. `build_isolation_corpus.py` (stdlib
+selected set, header, and omission counts, or a structured
+`incomplete_send_context` error with its `required` tokens. `isolation_loss_refused`
+is not a case-level expectation: it belongs to the per-store `jar` verdict,
+which pins both the refusal and the byte-identity of the opted-in output. `build_isolation_corpus.py` (stdlib
 only) materializes the stores as real Chromium `Cookies`/Firefox
 `cookies.sqlite` databases; `test_build_isolation_corpus.py` validates the
 corpus shape and checks a fresh build against the committed Node base64

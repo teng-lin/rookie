@@ -129,12 +129,12 @@ caller who has already decided isolation loss is acceptable.
 - **Breaking.** A Chromium partition key that names an explicit port is no
   longer matched against a top-level site that does not. 0.6 stripped any
   trailing port from the key, which was the one step in the comparison that
-  widened it. Chromium serializes a site without a port, so no key a current
-  browser writes is affected.
+  widened it. Chromium serializes a site without a port, so a key a current
+  browser writes should not be affected.
 - **Breaking.** A partitioned Chromium row whose store never recorded the
   ancestor bit is omitted from every send view rather than sent to any context
-  whose key otherwise matches. Only stores written before 2024 lack that
-  column. The row stays in the snapshot inventory, and the loss is counted both
+  whose key otherwise matches. Only a store last written by a Chromium older
+  than the mid-2024 schema that added the column can lack it. The row stays in the snapshot inventory, and the loss is counted both
   per view (`ancestor_chain_unknown`) and as the `unknown_ancestor_chain` read
   warning, so it is visible rather than silent.
 - **Breaking.** Two send-match outcomes change for Firefox rows that 0.6 got

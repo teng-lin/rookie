@@ -25,20 +25,28 @@ npm install rookie-cookies
 ## Recommended usage (0.6 series)
 
 ```js
-import { jar, read } from "rookie-cookies";
+import { read } from "rookie-cookies";
 
-const cookies = await jar({
+// Gecko session import — profile selection and session policy are independent
+const snapshot = await read({
   browser: "firefox",
   profile: "default-release",
   includeSession: true,
 });
+console.log(snapshot.warnings);
 
-const snapshot = await read({
-  browser: "chrome",
-  profile: "Work",
+// A browsing context in; the cookies it selects, the header they render to,
+// and a count of what was left out and why.
+const view = snapshot.sendView({
+  url: "https://app.example.com/",
+  topLevelSite: "https://example.com",
 });
-console.log(cookies, snapshot.warnings);
-console.log(snapshot.header("https://example.com/"));
+console.log(view.header, view.omitted.partition);
+
+// `snapshot.cookies` is the inventory projection. The flat `jar(...)` job is
+// compatibility only: it refuses an isolated snapshot unless
+// `allowIsolationLoss: true` names the loss.
+console.log(snapshot.cookies.length);
 ```
 
 Pass `profile` to select one discovered profile. `read` never URL-filters.
@@ -424,10 +432,14 @@ Current `stopReason` values are `timed_out`, `cancelled`, and
 `resource_exhausted`; treat the property as an open string for forward
 compatibility.
 Ambiguous profile errors also carry opaque `profileIds`; direct-path errors
-carry `sourceKind`, `targetOs`, and a `pathRedacted` flag. An
-`incomplete_send_context` error additionally carries `required: string[]` —
-the missing `SendContext` selector names (`top_level_site`,
-`user_context_id`, `private_browsing_id`); empty on every other error.
+carry `sourceKind`, `targetOs`, and a `pathRedacted` flag. The two send-selection
+codes — `incomplete_send_context` and `isolation_loss_refused` — additionally
+carry `required: string[]`, drawn from one six-token vocabulary
+(`top_level_site`, `user_context_id`, `private_browsing_id`,
+`first_party_domain`, `gecko_view_session_context_id`, `origin_attributes`).
+For the first it is the selectors the call did not receive; for the second,
+the ones a `sendView`/`header` call would need for that snapshot. It is empty
+on every other error.
 Human-readable `message` text remains diagnostic only. A `ReadResult`
 warning whose Rust `u64` count exceeds JavaScript's `Number.MAX_SAFE_INTEGER`
 sets `countersSaturated: true` while clamping `count` (an IEEE-754 `number`,
@@ -538,6 +550,7 @@ misused for.
 | `jar` options | `ReadOptions` | `JarOptions` — every `ReadOptions` field plus `allowIsolationLoss`, which `read`/`fromPath` reject rather than ignore |
 | Selectors | `topLevelSite`, `userContextId`, `privateBrowsingId` | plus `ancestorChain`, `firstPartyDomain`, `geckoViewSessionContextId`, `originAttributes` |
 | `required` | Populated for `incomplete_send_context` | Also for `isolation_loss_refused`, from the same six-token vocabulary |
+| Same-site | Literal host equality | A request host that is a subdomain of `topLevelSite`'s host is now same-site, so `SameSite=Lax`/`Strict` rows it used to withhold are selected. Sibling subdomains stay cross-site; IP literals still need an exact match |
 
 1. Leave `read`, `snapshot.cookies`, and `snapshot.detailedCookies` alone —
    none of them changed. `cookies` is still the infallible *inventory*

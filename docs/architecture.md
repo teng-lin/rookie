@@ -22,7 +22,7 @@ This document is the current-state map for a contributor who needs to name a sta
 
 ## Background & Motivation
 
-This is a maintained fork of archived [`thewh1teagle/rookie`](https://github.com/thewh1teagle/rookie). Downstream still calls `chrome()`, `firefox()`, `load()`, and the eight-field `Cookie`. Those shapes stay through 0.6 so existing consumers keep working; they are deprecated, and 0.7 will break them.
+This is a maintained fork of archived [`thewh1teagle/rookie`](https://github.com/thewh1teagle/rookie). Downstream still calls `chrome()`, `firefox()`, `load()`, and the eight-field `Cookie`. Those shapes stay through 0.6 and 0.7 so existing consumers keep working; they are deprecated, and a later release will break them.
 
 The tree outgrew a bag of per-browser functions:
 
@@ -1761,7 +1761,7 @@ Map of **existing** decisions. Not new ones.
 
 16. **Open string newtypes, non-exhaustive DTOs, `u32` counters.** New engines/tiers/codes cannot break downstream matches; Node does not see BigInt counters.
 
-17. **Compatibility is a bridge, not a promise.** Plan on migrating off `chrome()` / `load()` / `*_based` before 0.7.
+17. **Compatibility is a bridge, not a promise.** Plan on migrating off `chrome()` / `load()` / `*_based` before they are removed. 0.7 removes none of them; the deprecation window is still open.
 
 18. **An unreadable isolation dimension is unknown, never the default (ADR 0006).** Chromium matching includes the persisted `has_cross_site_ancestor` bit and the key's explicit port; Firefox `partitionKey` is the strict grammar `(scheme,host[,port][,f])` and all five `OriginAttributes` equality fields are compared. A stored `None` never matches a supplied selector, a supplied selector never matches a stored unrecognized attribute name, and an opaque row is reachable only by naming its raw `origin_attributes` suffix byte-for-byte — necessary, not sufficient. `ancestor_chain` and the Firefox partition port are derived from the request and `top_level_site`, so neither is ever a demand token; the six tokens (`top_level_site`, `user_context_id`, `private_browsing_id`, `first_party_domain`, `gecko_view_session_context_id`, `origin_attributes`) are append-only and shared by `incomplete_send_context` and `isolation_loss_refused`. No public-suffix list: `top_level_site` is caller-normalized, and site membership is same-scheme host equality or subdomain containment, with IP literals compared exactly.
 

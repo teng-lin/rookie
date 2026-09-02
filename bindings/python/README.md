@@ -494,12 +494,14 @@ Wheels were `cp38-abi3` until the 0.6 break.
 
 Nothing is renamed. `jar`, `as_jar`, `header`, `as_list`,
 `detailed_cookies`, and every named helper keep their names and their
-meanings. Two things change, and both are additions:
+meanings, and every 0.6 call still type-checks — the opt-in is a defaulted
+keyword-only argument. Three things change:
 
 | Change | What breaks | What to do |
 | --- | --- | --- |
 | `jar` / `as_jar` fail closed on isolation loss | Only a call against a snapshot that holds a partitioned or containered cookie. It now raises `RookieRequestError` with `code == "isolation_loss_refused"` instead of silently flattening. Unisolated snapshots are unaffected. | Move to `send_view()` / `header()` if you were going to *send* those cookies, or pass `allow_isolation_loss=True` if you were not. |
 | `header()` matches on full partition identity | A `header()` call that previously merged two contexts' cookies now splits them, and a row carrying an origin attribute this build does not recognize is omitted until you name it with `origin_attributes`. | Supply the selectors the error's `required` list names. Use `send_view()`'s `omitted` counts to see what a context excluded and why. |
+| Same-site includes subdomains | A `SameSite=Lax`/`Strict` row is now selected for a request host that is a subdomain of `top_level_site`'s host, where 0.6 required literal host equality. The rule only widens — nothing that was sent before is withheld now. | Nothing, unless you were relying on literal host equality. Sibling subdomains stay cross-site, and an IP literal on either side still needs an exact match. |
 
 1. Wherever you called `jar(...)` / `as_jar()` in order to send cookies,
    call `send_view(url, top_level_site=...)` instead and use its `"header"`.

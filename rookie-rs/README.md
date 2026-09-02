@@ -381,7 +381,8 @@ same-site — the known failure mode of that contract, and not something the
 crate can detect. A partitioned Chromium row whose store never recorded
 `has_cross_site_ancestor` is omitted from every send view rather than assumed
 (counted `ancestor_chain_unknown`, and warned as `unknown_ancestor_chain` at
-read time); only stores written before 2024 lack that column. A Firefox row
+read time); only a store last written by a Chromium older than the
+mid-2024 schema that added the column can lack it. A Firefox row
 carrying an attribute name this build does not recognize — or a `partitionKey`
 it cannot parse, provided the row stored an `originAttributes` value at all —
 is *opaque*: it is reachable only by an `origin_attributes` selector equal to
@@ -391,8 +392,8 @@ whose partition key no parser understood and which stored no suffix has
 nothing to name, so it is unreachable from any context; a Chromium row is
 always in that position, since a Chromium key carries no suffix. Chromium's partition port is identity, not noise: a key naming an
 explicit port does not match a `top_level_site` that does not, though
-Chromium's own `SchemefulSite` serializes without one, so no key a current
-browser writes is affected. There is one same-site rule, not a
+Chromium's own `SchemefulSite` serializes without one, so a key a
+current browser writes should not be affected. There is one same-site rule, not a
 schemeful/legacy dual mode. A caller needing browser-exact behavior —
 storage-access grants, First-Party Sets, nonce-keyed partitions — needs a
 browser.
