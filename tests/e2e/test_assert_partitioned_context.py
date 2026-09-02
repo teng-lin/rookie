@@ -232,6 +232,18 @@ def chromium_context(**overrides: object) -> dict:
 
 
 CHROMIUM_UNPARTITIONED = chromium_context()
+# The three views the stub manifest below declares. The real table lives in
+# partition_context_inventory.json and is checked against the real seven-view
+# manifest in test_partition_context_oracle.py.
+STUB_FLOORS = {
+    "nested_same_site": {
+        "exact_values_by_name": {"rookie_ancestor": ["ancestor-same_site"]}
+    },
+    "nested_cross_site": {
+        "exact_values_by_name": {"rookie_ancestor": ["ancestor-cross_site"]}
+    },
+    "top_cross_site": {"exact_values_by_name": {"rookie_top": []}},
+}
 FIREFOX_ANCESTOR_ROWS = [
     cookie(
         "rookie_ancestor",
@@ -336,6 +348,7 @@ class PartitionContextAssertionTests(unittest.TestCase):
             FakeSnapshot(records),
             engine="chromium",
             manifest=manifest_for(records),
+            floors=STUB_FLOORS,
         )
         self.assertEqual(
             views["nested_same_site"], ["rookie_ancestor=ancestor-same_site"]
@@ -356,7 +369,69 @@ class PartitionContextAssertionTests(unittest.TestCase):
                 view["header_tokens"] = ["rookie_ancestor=ancestor-same_site"]
         with self.assertRaises(ManifestError):
             ASSERT.validate_send_views(
-                FakeSnapshot(records), engine="chromium", manifest=manifest
+                FakeSnapshot(records),
+                engine="chromium",
+                manifest=manifest,
+                floors=STUB_FLOORS,
+            )
+
+    def test_a_floor_catches_a_view_that_went_quietly_empty(self) -> None:
+        # The oracle and the library read the same rows, so a shared misreading
+        # would agree on an empty set. The floor is the assertion that cannot.
+        records = ancestor_corpus()
+        manifest = manifest_for(records)
+        for view in manifest["expected_send_views"]:
+            if view["name"] == "nested_cross_site":
+                view["expected"] = []
+                view["header_tokens"] = []
+
+        class EmptySnapshot(FakeSnapshot):
+            def send_view(self, context: dict) -> dict:
+                if context.get("ancestor_chain") == "cross_site" and "nested" in str(
+                    context["url"]
+                ):
+                    # Everything else about the answer still looks healthy: the
+                    # header matches, and the omission counters clear their
+                    # floors. Only the floor on the values notices.
+                    view = super().send_view(context)
+                    return {"cookies": [], "header": "", "omitted": view["omitted"]}
+                return super().send_view(context)
+
+        with self.assertRaisesRegex(
+            ASSERT.ContextAssertionError, "rookie_ancestor values"
+        ):
+            ASSERT.validate_send_views(
+                EmptySnapshot(records),
+                engine="chromium",
+                manifest=manifest,
+                floors=STUB_FLOORS,
+            )
+
+    def test_a_floor_catches_a_missing_required_token(self) -> None:
+        records = ancestor_corpus()
+        floors = {
+            **STUB_FLOORS,
+            "top_cross_site": {"at_least": ["rookie_top=top-a"]},
+        }
+        with self.assertRaisesRegex(ASSERT.ContextAssertionError, "did not select"):
+            ASSERT.validate_send_views(
+                FakeSnapshot(records),
+                engine="chromium",
+                manifest=manifest_for(records),
+                floors=floors,
+            )
+
+    def test_a_floor_for_a_view_the_manifest_never_ran_is_rejected(self) -> None:
+        records = ancestor_corpus()
+        floors = {**STUB_FLOORS, "matching": {"at_least": ["rookie_chips=x"]}}
+        with self.assertRaisesRegex(
+            ASSERT.ContextAssertionError, "the manifest never ran"
+        ):
+            ASSERT.validate_send_views(
+                FakeSnapshot(records),
+                engine="chromium",
+                manifest=manifest_for(records),
+                floors=floors,
             )
 
     def test_a_cross_site_view_that_keeps_a_lax_row_is_rejected(self) -> None:
@@ -380,7 +455,10 @@ class PartitionContextAssertionTests(unittest.TestCase):
 
         with self.assertRaises(ManifestError):
             ASSERT.validate_send_views(
-                LaxLeakingSnapshot(records), engine="chromium", manifest=manifest
+                LaxLeakingSnapshot(records),
+                engine="chromium",
+                manifest=manifest,
+                floors=STUB_FLOORS,
             )
 
     def test_valid_chromium_context_and_headers(self) -> None:

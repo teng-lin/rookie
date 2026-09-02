@@ -14,8 +14,13 @@ import sqlite3
 import tempfile
 import unittest
 
+from assert_partitioned_context import row_inventory
 from run_active_writer_e2e import ActiveWriterError
-from run_partition_context_e2e import write_raw_context_manifest
+from run_partition_context_e2e import (
+    _firefox_isolation_reason,
+    _omission_reason,
+    write_raw_context_manifest,
+)
 
 
 PORT = 8766
@@ -257,6 +262,16 @@ def selected(manifest: dict[str, object], name: str) -> list[str]:
     )
 
 
+# What the two engines were actually observed to write: Chromium 151 stores
+# both ancestor bits, and Firefox 153 partitions even the direct same-site
+# iframe, so its same-site row carries the plain A key rather than no key. The
+# inventory floors are written against these shapes.
+OBSERVED_STORES = (
+    ("chromium", CHROMIUM_ROWS),
+    ("firefox", firefox_rows(PARTITION_A)),
+)
+
+
 class PartitionContextOracleTests(unittest.TestCase):
     def test_chromium_ancestor_bit_splits_two_otherwise_identical_rows(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -358,8 +373,11 @@ class PartitionContextOracleTests(unittest.TestCase):
                 "rookie_dfpi=dfpi-a",
             ],
         )
-        # Firefox treats the direct same-site iframe as first party, so its row
-        # is unpartitioned and reachable from the first-party context.
+        # The alternative shape: a Firefox that treated the direct same-site
+        # iframe as first party would leave its row unpartitioned and reachable
+        # from the first-party context. Firefox 153 does not, which is what the
+        # inventory floor for `nested_derived` pins; a build that changed back
+        # would fail that floor rather than pass unnoticed.
         self.assertEqual(
             selected(manifest, "nested_derived"),
             ["rookie_ancestor=ancestor-same_site"],
@@ -385,6 +403,101 @@ class PartitionContextOracleTests(unittest.TestCase):
             selected(manifest, "nested_cross_site"),
             ["rookie_ancestor=ancestor-cross_site"],
         )
+
+    def test_an_unreadable_firefox_key_is_unparsable_even_first_party(self) -> None:
+        # `RequestIsolation::verdict` answers "opaque" before any field-by-field
+        # gate, so an unreadable key is withheld as `unparsable_partition_key`
+        # in every context -- including the first-party one, where the guard
+        # below it would otherwise have claimed the row as `partition`.
+        broken = {"partition_key": "(https,rookie-a.test", "origin_attributes": "^x"}
+        first_party = {
+            "url": f"https://rookie-a.test:{PORT}/",
+            "top_level_site": "https://rookie-a.test",
+        }
+        self.assertEqual(
+            _firefox_isolation_reason(
+                broken,
+                first_party,
+                sites_match=True,
+                resolved="same_site",
+                same_site_context=True,
+            ),
+            "unparsable_partition_key",
+        )
+        self.assertEqual(
+            _firefox_isolation_reason(
+                broken,
+                {**first_party, "url": f"https://third.rookie-b.test:{PORT}/"},
+                sites_match=False,
+                resolved="cross_site",
+                same_site_context=False,
+            ),
+            "unparsable_partition_key",
+        )
+
+    def test_the_oracle_refuses_a_context_it_does_not_model(self) -> None:
+        record = {
+            "cookie": {
+                "domain": "rookie-a.test",
+                "path": "/",
+                "secure": True,
+                "expires": EXPIRES,
+                "name": "rookie_x",
+                "value": "x",
+                "http_only": False,
+                "same_site": 0,
+            },
+            "context": {"partition_key": None, "origin_attributes": ""},
+        }
+        with self.assertRaisesRegex(ActiveWriterError, "does not model"):
+            _omission_reason(
+                record,
+                {
+                    "url": "https://rookie-a.test/",
+                    "top_level_site": "https://rookie-a.test",
+                    "origin_attributes": "^futureAttr=1",
+                },
+                "firefox",
+            )
+
+    def test_every_floor_names_a_context_the_lane_actually_runs(self) -> None:
+        # The floors are only a backstop if each one lands on a real view; a
+        # renamed context would otherwise take its floor out of service.
+        for engine, rows in OBSERVED_STORES:
+            with self.subTest(engine=engine), tempfile.TemporaryDirectory() as temporary:
+                manifest = build_manifest(engine, rows, Path(temporary))
+                names = {view["name"] for view in manifest["expected_send_views"]}
+                floors = row_inventory(engine)["send_view_floors"]
+                self.assertEqual(set(floors), names, engine)
+                for name, floor in floors.items():
+                    self.assertTrue(
+                        set(floor) <= {"at_least", "exact_values_by_name"}, name
+                    )
+                    self.assertTrue(floor, name)
+
+    def test_the_declared_floors_hold_for_the_derived_sets(self) -> None:
+        # The floors are hand-written from what the browser was asked to store.
+        # They must agree with what the oracle derives, or one of the two is
+        # wrong and the lane would be arguing with itself in CI.
+        for engine, rows in OBSERVED_STORES:
+            with self.subTest(engine=engine), tempfile.TemporaryDirectory() as temporary:
+                manifest = build_manifest(engine, rows, Path(temporary))
+                floors = row_inventory(engine)["send_view_floors"]
+                for view in manifest["expected_send_views"]:
+                    floor = floors[view["name"]]
+                    tokens = selected(manifest, view["name"])
+                    self.assertTrue(
+                        set(floor.get("at_least", [])) <= set(tokens), view["name"]
+                    )
+                    for name, expected in floor.get(
+                        "exact_values_by_name", {}
+                    ).items():
+                        actual = sorted(
+                            record["cookie"]["value"]
+                            for record in view["expected"]
+                            if record["cookie"]["name"] == name
+                        )
+                        self.assertEqual(actual, sorted(expected), view["name"])
 
     def test_a_row_count_that_disagrees_with_the_inventory_fails(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

@@ -357,6 +357,34 @@ function omissionCount(omitted, reason) {
   return value;
 }
 
+// The oracle and the binding read the same stored rows, so a shared misreading
+// would make them agree on an empty set and leave every partition claim
+// vacuous. These floors are written out by hand and cannot go quiet.
+function applySendViewFloors(name, floors, records, rendered) {
+  if (!floors) return;
+  const missing = (floors.at_least || []).filter(
+    (token) => !rendered.includes(token),
+  );
+  if (missing.length) {
+    throw new Error(
+      `send view ${name} did not select the required ${JSON.stringify(missing)}; it selected ${JSON.stringify(rendered)}`,
+    );
+  }
+  for (const [cookieName, expected] of Object.entries(
+    floors.exact_values_by_name || {},
+  )) {
+    const actual = records
+      .filter(({ cookie }) => cookie.name === cookieName)
+      .map(({ cookie }) => cookie.value)
+      .sort();
+    if (JSON.stringify(actual) !== JSON.stringify([...expected].sort())) {
+      throw new Error(
+        `send view ${name} selected ${cookieName} values ${JSON.stringify(actual)}, expected exactly ${JSON.stringify([...expected].sort())}`,
+      );
+    }
+  }
+}
+
 const sendViews = {};
 if (rawManifest) {
   const crossSite = rawManifest.expected_send_views.find(
@@ -367,6 +395,12 @@ if (rawManifest) {
       "the explicit cross-site context must have a SameSite=Lax row to omit",
     );
   }
+  if (crossSite.expected.length) {
+    throw new Error(
+      `declaring a same-site request cross-site must withhold its Lax rows, but the oracle still selects ${crossSite.expected.length}`,
+    );
+  }
+  const floors = inventory.send_view_floors || {};
   for (const view of rawManifest.expected_send_views) {
     const actual = snapshot.sendView(toSendContext(view.context));
     const records = actual.cookies.filter(({ cookie }) =>
@@ -393,7 +427,14 @@ if (rawManifest) {
         );
       }
     }
+    applySendViewFloors(view.name, floors[view.name], records, rendered);
     sendViews[view.name] = rendered;
+  }
+  const unchecked = Object.keys(floors).filter((name) => !(name in sendViews));
+  if (unchecked.length) {
+    throw new Error(
+      `${engine} declares floors for send views the manifest never ran: ${JSON.stringify(unchecked.sort())}`,
+    );
   }
 }
 

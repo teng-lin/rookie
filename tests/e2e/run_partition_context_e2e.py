@@ -383,13 +383,18 @@ def _firefox_isolation_reason(
     key = fields["partition_key"]
     if key in (None, ""):
         return None
+    parsed = _parse_firefox_partition_tuple(str(key))
+    if parsed is None:
+        # An unreadable key makes the row opaque, and `RequestIsolation::verdict`
+        # answers that before any field-by-field gate: there is nothing to
+        # compare, so the first-party guard below never gets a say. Ordering
+        # this the other way would attribute the row to `partition` and
+        # disagree with the core over a row both agree to withhold.
+        return "unparsable_partition_key"
     if same_site_context:
         # A partition is by construction not the unpartitioned default
         # context, so a first-party request never reaches into one.
         return "partition"
-    parsed = _parse_firefox_partition_tuple(str(key))
-    if parsed is None:
-        return "unparsable_partition_key"
     scheme, host, port, foreign = parsed
     site = urlparse(send_context["top_level_site"])
     if (scheme, host) != (site.scheme, site.hostname):
@@ -416,6 +421,13 @@ def _omission_reason(
 
     cookie = record["cookie"]
     fields = record["context"]
+    if send_context.get("origin_attributes") is not None:
+        # The raw suffix selector governs opaque rows, which this oracle does
+        # not model. No lane context supplies one; a future one that does must
+        # teach the oracle first rather than get a quietly wrong expectation.
+        raise ActiveWriterError(
+            "the send-view oracle does not model the raw origin_attributes selector"
+        )
     request = urlparse(send_context["url"])
     if cookie["domain"].removeprefix(".") != request.hostname:
         return "not_applicable"

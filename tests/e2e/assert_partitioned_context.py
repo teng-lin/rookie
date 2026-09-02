@@ -437,13 +437,18 @@ def omission_count(omitted: dict[str, Any], reason: str) -> int:
 
 
 def validate_send_views(
-    snapshot: Snapshot, *, engine: str, manifest: dict[str, Any]
+    snapshot: Snapshot,
+    *,
+    engine: str,
+    manifest: dict[str, Any],
+    floors: dict[str, Any] | None = None,
 ) -> dict[str, list[str]]:
     """Compare every context's selected set against the raw-store oracle.
 
     Each expected set was derived from the browser's own SQLite rows, so this
     is a comparison between the library and the browser, not between the
-    library and itself.
+    library and itself. `floors` defaults to the inventory's table for this
+    engine and exists as a seam for tests driving a stub manifest.
     """
 
     cross = send_view_entry(manifest, "top_cross_site")
@@ -458,6 +463,8 @@ def validate_send_views(
             f"but the oracle still selects {len(cross['expected'])}"
         )
 
+    if floors is None:
+        floors = row_inventory(engine).get("send_view_floors", {})
     selected_tokens: dict[str, list[str]] = {}
     for name in send_view_names(manifest):
         entry = send_view_entry(manifest, name)
@@ -486,8 +493,50 @@ def validate_send_views(
                     f"send view {name} counted {actual} {reason} omissions, "
                     f"expected at least {minimum}"
                 )
+        apply_send_view_floors(name, floors.get(name), records, tokens)
         selected_tokens[name] = tokens
+    unchecked = sorted(set(floors) - set(selected_tokens))
+    if unchecked:
+        raise ContextAssertionError(
+            f"{engine} declares floors for send views the manifest never ran: "
+            f"{unchecked}"
+        )
     return selected_tokens
+
+
+def apply_send_view_floors(
+    name: str,
+    floors: dict[str, Any] | None,
+    records: list[dict[str, Any]],
+    tokens: list[str],
+) -> None:
+    """Hold one live send view to its hand-written floor.
+
+    The oracle and the library read the same stored rows, so a shared
+    misreading would make them agree on an empty set and leave every partition
+    claim vacuously true. These floors are written out by hand, from what the
+    browser was asked to store, and cannot go quiet.
+    """
+
+    if floors is None:
+        return
+    missing = sorted(set(floors.get("at_least", [])) - set(tokens))
+    if missing:
+        raise ContextAssertionError(
+            f"send view {name} did not select the required {missing}; "
+            f"it selected {tokens}"
+        )
+    for cookie_name, expected in floors.get("exact_values_by_name", {}).items():
+        actual = sorted(
+            record["cookie"]["value"]
+            for record in records
+            if record["cookie"]["name"] == cookie_name
+        )
+        if actual != sorted(expected):
+            raise ContextAssertionError(
+                f"send view {name} selected {cookie_name} values {actual}, "
+                f"expected exactly {sorted(expected)}"
+            )
 
 
 def main() -> int:

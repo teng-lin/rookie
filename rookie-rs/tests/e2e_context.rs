@@ -45,12 +45,39 @@ fn row_inventory(engine: &str) -> serde_json::Value {
   inventory["engines"][engine].clone()
 }
 
+/// Every manifest send-context key this test knows how to apply.
+///
+/// A key outside this set is a manifest the other surfaces would honour and
+/// this one would silently ignore, which is exactly the divergence the lane
+/// exists to prevent -- so it panics rather than skipping.
+const SEND_CONTEXT_KEYS: [&str; 10] = [
+  "url",
+  "top_level_site",
+  "resource",
+  "method",
+  "ancestor_chain",
+  "user_context_id",
+  "private_browsing_id",
+  "first_party_domain",
+  "gecko_view_session_context_id",
+  "origin_attributes",
+];
+
 /// Builds a [`SendContext`] from one manifest send context.
 ///
 /// The manifest spells every selector in the snake_case the Python and CLI
 /// surfaces also read, so all four surfaces are demonstrably answering the
 /// same question rather than four similar ones.
 fn send_context_from(context: &serde_json::Value) -> SendContext {
+  let fields = context
+    .as_object()
+    .expect("a manifest send context must be an object");
+  for key in fields.keys() {
+    assert!(
+      SEND_CONTEXT_KEYS.contains(&key.as_str()),
+      "manifest send context carries the unhandled selector {key}"
+    );
+  }
   let mut built = SendContext::url(
     context["url"]
       .as_str()
@@ -87,6 +114,24 @@ fn send_context_from(context: &serde_json::Value) -> SendContext {
   {
     built = built.user_context_id(id as u32);
   }
+  if let Some(id) = context
+    .get("private_browsing_id")
+    .and_then(|value| value.as_u64())
+  {
+    built = built.private_browsing_id(id as u32);
+  }
+  if let Some(domain) = context
+    .get("first_party_domain")
+    .and_then(|value| value.as_str())
+  {
+    built = built.first_party_domain(domain);
+  }
+  if let Some(id) = context
+    .get("gecko_view_session_context_id")
+    .and_then(|value| value.as_str())
+  {
+    built = built.gecko_view_session_context_id(id);
+  }
   if let Some(attributes) = context
     .get("origin_attributes")
     .and_then(|value| value.as_str())
@@ -94,6 +139,57 @@ fn send_context_from(context: &serde_json::Value) -> SendContext {
     built = built.origin_attributes(attributes);
   }
   built
+}
+
+/// Holds one live send view to its hand-written floor.
+///
+/// The oracle and the library read the same stored rows, so a shared
+/// misreading would make them agree on an empty set and leave every partition
+/// claim vacuously true. These floors come from what the browser was asked to
+/// store, not from either reader, and cannot go quiet.
+fn apply_send_view_floors(
+  name: &str,
+  floors: &serde_json::Value,
+  records: &[rookie_cookies::enums::DetailedCookie],
+  rendered: &[String],
+) {
+  if floors.is_null() {
+    return;
+  }
+  if let Some(required) = floors.get("at_least").and_then(|value| value.as_array()) {
+    for token in required {
+      let token = token.as_str().expect("floor token");
+      assert!(
+        rendered.iter().any(|selected| selected == token),
+        "send view {name} did not select the required {token}; it selected {rendered:?}"
+      );
+    }
+  }
+  let Some(exact) = floors
+    .get("exact_values_by_name")
+    .and_then(|value| value.as_object())
+  else {
+    return;
+  };
+  for (cookie_name, expected) in exact {
+    let mut expected = expected
+      .as_array()
+      .expect("floor value list")
+      .iter()
+      .map(|value| value.as_str().expect("floor value").to_owned())
+      .collect::<Vec<_>>();
+    expected.sort();
+    let mut actual = records
+      .iter()
+      .filter(|record| &record.cookie.name == cookie_name)
+      .map(|record| record.cookie.value.clone())
+      .collect::<Vec<_>>();
+    actual.sort();
+    assert_eq!(
+      actual, expected,
+      "send view {name} selected {cookie_name} values that miss their floor"
+    );
+  }
 }
 
 /// Compares one selected set against the manifest's independently derived one.
@@ -145,11 +241,13 @@ fn omission_count(omitted: &rookie_cookies::SendOmissions, reason: &str) -> u64 
 /// Drives every manifest send context through `send_view` and checks all three
 /// halves of the answer: the selected set, the header it renders, and the
 /// omission counters.
-fn assert_manifest_send_views(snapshot: &rookie_cookies::ReadResult) {
+fn assert_manifest_send_views(snapshot: &rookie_cookies::ReadResult, engine: &str) {
   let Ok(manifest_path) = env::var("ROOKIE_E2E_CONTEXT_MANIFEST") else {
     return;
   };
   let manifest = read_json(PathBuf::from(&manifest_path));
+  let floors = row_inventory(engine)["send_view_floors"].clone();
+  let mut checked = Vec::new();
   let views = manifest["expected_send_views"]
     .as_array()
     .expect("the manifest must carry expected_send_views");
@@ -190,6 +288,23 @@ fn assert_manifest_send_views(snapshot: &rookie_cookies::ReadResult) {
         "send view {name} counted {actual} {reason} omissions, expected at least {minimum}"
       );
     }
+    apply_send_view_floors(
+      name,
+      &floors[name],
+      &selected,
+      &header_tokens(&view.header()),
+    );
+    checked.push(name.to_owned());
+  }
+  for name in floors
+    .as_object()
+    .expect("the inventory must map send view names onto floors")
+    .keys()
+  {
+    assert!(
+      checked.contains(name),
+      "{engine} declares a floor for send view {name}, which the manifest never ran"
+    );
   }
   // Declaring a same-site request cross-site must withhold its Lax rows; the
   // oracle has to contain such a row for that claim to mean anything.
@@ -557,7 +672,7 @@ fn browser_produced_partition_context_survives_snapshot_and_header_filter() {
     other => panic!("missing selector returned the wrong error: {other:?}"),
   }
 
-  assert_manifest_send_views(&snapshot);
+  assert_manifest_send_views(&snapshot, &engine);
 }
 
 #[test]

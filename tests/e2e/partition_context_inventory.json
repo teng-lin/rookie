@@ -2,6 +2,7 @@
   "schema_version": 1,
   "kind": "partition-context-row-inventory",
   "comment": "The single expected-row table for the partition-context lane. The raw-store oracle (run_partition_context_e2e.write_raw_context_manifest), every public-surface assertion (assert_partitioned_context.py/.mjs, rookie-rs/tests/e2e_context.rs, assert_partitioned_context_cli.py), and the browser seeder (seed_partitioned_cookie.mjs) all read these counts so a corpus change cannot be applied to some of them and forgotten in the rest. raw_rows_by_name counts rows in the browser's own SQLite store; browser_visible_minimums is the weaker lower bound Playwright's context.cookies() can be held to, because a Playwright cookie list does not always separate two rows that differ only in their partition ancestor bit.",
+  "send_view_floors_comment": "Literal floors for the live send views, checked in addition to the derived exact sets. The oracle and the library read the same stored rows, so a shared misreading -- a port appearing in a stored key, say, against a top-level site the lane normalizes without one -- would make both agree on an empty set and leave every partition claim vacuous. These hand-written floors cannot go empty quietly. at_least names tokens the view must contain; exact_values_by_name pins the complete set of values selected for one cookie name, including the empty list, which is how the engines' different handling of a same-site subframe is stated rather than tolerated.",
   "engines": {
     "chromium": {
       "raw_row_total": 7,
@@ -14,6 +15,29 @@
         "rookie_top": 2,
         "rookie_chips": 3,
         "rookie_ancestor": 1
+      },
+      "send_view_floors": {
+        "matching": {
+          "at_least": ["rookie_chips=partition-a", "rookie_chips=unpartitioned"]
+        },
+        "other_top_level_site": {
+          "at_least": ["rookie_chips=partition-c", "rookie_chips=unpartitioned"]
+        },
+        "nested_derived": {
+          "exact_values_by_name": { "rookie_ancestor": ["ancestor-same_site"] }
+        },
+        "nested_same_site": {
+          "exact_values_by_name": { "rookie_ancestor": ["ancestor-same_site"] }
+        },
+        "nested_cross_site": {
+          "exact_values_by_name": { "rookie_ancestor": ["ancestor-cross_site"] }
+        },
+        "top_first_party": {
+          "at_least": ["rookie_top=top-a"]
+        },
+        "top_cross_site": {
+          "exact_values_by_name": { "rookie_top": [] }
+        }
       }
     },
     "firefox": {
@@ -29,6 +53,37 @@
         "rookie_chips": 3,
         "rookie_dfpi": 2,
         "rookie_ancestor": 1
+      },
+      "send_view_floors": {
+        "matching": {
+          "at_least": [
+            "rookie_chips=partition-a",
+            "rookie_chips=unpartitioned",
+            "rookie_dfpi=dfpi-a"
+          ]
+        },
+        "other_top_level_site": {
+          "at_least": [
+            "rookie_chips=partition-c",
+            "rookie_chips=unpartitioned",
+            "rookie_dfpi=dfpi-c"
+          ]
+        },
+        "nested_derived": {
+          "exact_values_by_name": { "rookie_ancestor": [] }
+        },
+        "nested_same_site": {
+          "exact_values_by_name": { "rookie_ancestor": [] }
+        },
+        "nested_cross_site": {
+          "exact_values_by_name": { "rookie_ancestor": ["ancestor-cross_site"] }
+        },
+        "top_first_party": {
+          "at_least": ["rookie_top=top-a"]
+        },
+        "top_cross_site": {
+          "exact_values_by_name": { "rookie_top": [] }
+        }
       }
     }
   }
