@@ -229,17 +229,21 @@ rows = cookies.read(browser="chrome", profile="Work").as_list()
 ```javascript
 import { jar, read } from "rookie-cookies";
 
+// A flat list cannot carry a partition or a container, so an isolated
+// snapshot refuses unless the loss is named.
 const sessionCookies = await jar({
   browser: "firefox",
   profile: "default-release",
   includeSession: true,
+  allowIsolationLoss: true,
 });
 
 const snapshot = await read({
   browser: "chrome",
   profile: "Work",
 });
-console.log(sessionCookies, snapshot.header("https://example.com/"));
+const view = snapshot.sendView("https://example.com/");
+console.log(sessionCookies, view.header, view.omitted);
 ```
 
 Extraction is async. Always `await`.

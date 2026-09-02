@@ -78,6 +78,18 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `incomplete_send_context` and `isolation_loss_refused`. It lists the
   selector tokens the call is missing, drawing on the same vocabulary the
   Python and Node bindings already expose.
+- The Node binding gained `ReadResult.sendView(context)`, returning the
+  selected `DetailedCookieObject[]` in header order, the rendered `header`
+  string, and an `omitted` object carrying all seven omission reasons as
+  numbers (`expired`, `notApplicable`, `sameSite`, `partition`,
+  `ancestorChainUnknown`, `unparsablePartitionKey`, `origin`), zeroes
+  included. `ReadResult.header` now renders from it rather than repeating the
+  match. `SendContextObject` gained `ancestorChain` (typed as the new
+  `AncestorChain` union, `'same_site' | 'cross_site'`; any other string
+  rejects with `InvalidArg`), `firstPartyDomain`,
+  `geckoViewSessionContextId`, and `originAttributes`. `RookieError.required`
+  is now documented as covering `isolation_loss_refused` as well as
+  `incomplete_send_context`.
 
 ### Changed
 
@@ -176,6 +188,19 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the ones the call did not receive. Code that already branches on one's
   `required` needs no second vocabulary, and the attribute stays present and
   empty on every other error.
+
+- The Node `jar` fails closed and takes a new `JarOptions`. Against a snapshot
+  holding a partitioned or containered cookie it now rejects with
+  `rookieCode === "isolation_loss_refused"`, whose `required` names the same
+  selector tokens `sendView`/`header` demand, instead of resolving a flat
+  `CookieObject[]` that has silently merged two browsing contexts. Pass
+  `allowIsolationLoss: true` to opt in; the resolved value is then
+  byte-for-byte `read(...).cookies`, and a snapshot with no isolated rows
+  resolves either way exactly as before. `JarOptions` is every `ReadOptions`
+  field plus that flag -- deliberately not on `ReadOptions` itself, where a
+  non-jar call would have silently ignored it; `read` and `fromPath` reject
+  the flag by name, before any I/O, rather than accepting and dropping it.
+  `snapshot.cookies` and `snapshot.detailedCookies` are unaffected.
 
 ### Fixed
 
