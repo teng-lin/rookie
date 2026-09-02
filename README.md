@@ -254,6 +254,7 @@ fn main() -> rookie_cookies::Result<()> {
 ```console
 rookie-cookies read --browser firefox --profile default-release --include-session
 rookie-cookies header --url https://example.com/ --browser chrome
+rookie-cookies send-view --url https://example.com/ --top-level-site https://example.com --browser chrome
 rookie-cookies from-path /path/to/cookies.sqlite
 rookie-cookies from-path /path/to/Cookies --browser-id chrome
 rookie-cookies report --browser chrome
@@ -268,10 +269,33 @@ subcommands only: `header` takes `--url` rather than a positional, `report`
 takes an optional `--browser` (omitting it means the aggregate report), and
 the old top-level `--path` / `--browser` flags are gone.
 
+`header` and `send-view` share one flat send selector: `--url`,
+`--top-level-site`, `--resource`, `--method`, `--user-context-id`,
+`--private-browsing-id`, `--ancestor-chain same-site|cross-site`,
+`--first-party-domain`, `--gecko-view-session-context-id`,
+`--origin-attributes`, and `--now <epoch seconds>`. `send-view` prints one
+JSON object — `cookies` (the selected records, in `--format detailed`
+serialization), `header` (what `header` would print), and `omitted` (every
+omission reason with its count, zeroes included). `read` and `from-path`
+gain `--allow-isolation-loss`: `--format json` and `--format netscape` have
+no column for a partition key or a container identity, so a snapshot holding
+isolated cookies is refused (`isolation_loss_refused`) until that named
+opt-in says the loss is acceptable. `--format detailed` carries the context
+and never needs it. `from-path --domains` stays a flat, compatibility-only
+route and takes none of the selector surface, but it is not a way around the
+refusal: because its job returns cookies with no snapshot to refuse from, the
+CLI opens the same path a second time purely to ask the policy question, then
+runs the flat job unchanged. The extra open is confined to that route, and
+the printed bytes are exactly what the flat job has always produced.
+
 Runtime failures from the typed `rookie_cookies::Error` hierarchy are written
-to stderr as one JSON object with exactly `code` and `message` fields. Branch
-on the stable `code`; `message` is a human diagnostic and may change. Clap
-usage errors and wrapped or non-library failures retain their normal human
+to stderr as one JSON object. Every such object carries `code` and `message`;
+a given `code` may add further documented fields, and the two send-selection
+codes — `incomplete_send_context` and `isolation_loss_refused` — add
+`required`, the list of selector tokens the call is missing. Consumers must
+ignore keys they do not recognize rather than reject them. Branch on the
+stable `code`; `message` is a human diagnostic and may change. Clap usage
+errors and wrapped or non-library failures retain their normal human
 `Display` output and are not promised to be JSON. Failed jobs do not write a
 partial cookie result to stdout.
 

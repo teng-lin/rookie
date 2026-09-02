@@ -19,7 +19,7 @@ pub struct PyReadWarning {
 #[pymethods]
 impl PyReadWarning {
   fn __str__(&self) -> String {
-    format!("skipped {} rows ({})", self.count, self.code)
+    format!("{} rows affected ({})", self.count, self.code)
   }
 
   fn __repr__(&self) -> String {

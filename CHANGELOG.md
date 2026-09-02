@@ -28,6 +28,32 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   whose store predates the `has_cross_site_ancestor` column, mirroring the
   existing `unparsable_partition_key` warning.
 
+- The CLI gained a `send-view` subcommand, printing the whole selection behind
+  `header` as one JSON object: `cookies` (the selected records, in the same
+  serialization `--format detailed` emits), `header` (the string `header`
+  would print), and `omitted` (every omission reason with its count, zeroes
+  included, in the stable declared order). `header` and `send-view` share one
+  flat selector -- the existing `--url`, `--top-level-site`, `--resource`,
+  `--method`, `--user-context-id` and `--private-browsing-id`, joined by the
+  new `--ancestor-chain same-site|cross-site`, `--first-party-domain`,
+  `--gecko-view-session-context-id`, `--origin-attributes`, and `--now <epoch
+  seconds>` -- so a context expressed for one command is expressible for the
+  other. `from-path --domains` stays a flat, compatibility-only route and
+  takes none of this surface.
+- Read-warning text now reads `N rows affected (code)` rather than
+  `skipped N rows (code)`, in Rust and Python alike. Not every warning code
+  drops a row: `unparsable_partition_key` and `unknown_ancestor_chain` count
+  rows the snapshot keeps and no send context can select, so "skipped" was
+  wrong for them. The `code` and `count` fields are unchanged and remain the
+  thing to branch on; this text has never been a stable contract.
+- CLI error objects may now carry a third field. The rule is unchanged in
+  shape -- every object has `code` and `message`, a given `code` may define
+  further documented fields, and a consumer must ignore keys it does not
+  recognize -- and `required` is the first such field, defined for exactly
+  `incomplete_send_context` and `isolation_loss_refused`. It lists the
+  selector tokens the call is missing, drawing on the same vocabulary the
+  Python and Node bindings already expose.
+
 ### Changed
 
 - `header` now matches the full partition identity both engines actually use,
@@ -77,6 +103,23 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `cookies()` and `into_cookies()` are unaffected and stay infallible. They are
   the inventory projection, for seeing what the browser stored; `jar` is the
   one that promises the result is safe to send.
+- **Breaking (CLI).** `read` and `from-path` now route `--format json` and
+  `--format netscape` through the fail-closed jar, so a snapshot holding
+  isolated cookies exits 1 with `isolation_loss_refused` instead of printing a
+  flat list that has silently merged two browsing contexts. Neither format has
+  a column for a partition key or a container identity, which is exactly why
+  the refusal exists. To keep the previous output, pass the new
+  `--allow-isolation-loss` flag: it produces byte-for-byte what the command
+  printed before. `--format detailed` carries the context and is never
+  refused, so it needs no flag.
+
+  `from-path --domains` is covered by the same policy. That route runs a job
+  which returns cookies directly, with no snapshot for the jar to refuse
+  from, so the CLI opens the path a second time purely to ask the policy
+  question and discards the result. The flat job itself is untouched and its
+  output is byte-identical; what changes is that an isolated store now
+  refuses there too, instead of leaving one route where a merged list still
+  printed.
 - Same-site now means that the request host equals the top-level site's host or
   is a subdomain of it, on the same scheme. It previously meant literal host
   equality. A request to `www.example.com` under a `https://example.com`

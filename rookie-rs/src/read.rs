@@ -57,7 +57,11 @@ impl ReadWarning {
 
 impl std::fmt::Display for ReadWarning {
   fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-    write!(formatter, "skipped {} rows ({})", self.count, self.code)
+    // Not every warning code drops a row. `unparsable_partition_key` and
+    // `unknown_ancestor_chain` count rows the snapshot *keeps* and no send
+    // context can select, so "skipped" was wrong for them; "affected" is
+    // true of both the dropped and the retained codes.
+    write!(formatter, "{} rows affected ({})", self.count, self.code)
   }
 }
 
