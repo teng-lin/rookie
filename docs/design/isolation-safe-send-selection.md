@@ -2,10 +2,10 @@
 
 - **Author:** maintainers
 - **Date:** 2026-09-01
-- **Status:** Active program record. PRs 0–5 and PR 6b (the documentation
-  consolidation) are merged on `worktree-issue-331`; PR 6a (the e2e depth
-  extension and its `browser_coverage.json` contract) is in progress. See the
-  PR plan and acceptance mapping below for the commits that carried each one.
+- **Status:** Program complete. PRs 0–6 are merged on
+  `worktree-issue-331` and delivered as one pull request against `main`.
+  See the PR plan and acceptance mapping below for the commits that carried
+  each one.
 - **Crate/packages:** `rookie-rs`, `bindings/python` (`rookie_cookies`),
   `bindings/node` (`rookie-cookies`), `cli`
 - **Release context:** 0.7
@@ -421,8 +421,11 @@ introduces and splitting them would have meant shipping a half-wired
 PR 6 was split along its two independent halves so the documentation sweep
 did not have to wait on a real-browser lane:
 
-- [ ] **PR 6a** — E2E depth extension and the `browser_coverage.json`
-      `send_selection` capability contract. In progress.
+- [x] **PR 6a** — E2E depth extension and the `browser_coverage.json`
+      `send_selection` capability contract (`bd1d128`, `3f591e8`): the
+      partition lane seeds an A→B→A ancestor chain, derives every send view
+      from the browsers' own SQLite rows, enforces literal positive floors on
+      all four surfaces, and passed `e2e-depth.yml` on both engines.
 - [x] **PR 6b** — Final documentation sweep: the four package READMEs,
       `docs/architecture.md`, `docs/testing.md`, the ADR 0004/0006 status
       wording, this record, and the consolidated `CHANGELOG.md` Unreleased
@@ -499,8 +502,10 @@ did not have to wait on a real-browser lane:
 - Node header errors use the sync path; the shared `binding_error_details`
   keeps both paths aligned, and PR 5 added the sync-path `required` assertion
   explicitly rather than inheriting the async path's coverage.
-- `expected_counts` literals across three e2e files (PR 6a) must change
-  together or the lane will assert stale row counts against a real browser.
+- The e2e row inventory and send-view floors live in one table
+  (`tests/e2e/partition_context_inventory.json`, PR 6a); a change to the
+  seeded cookies must update that file, or the lane asserts stale counts
+  against a real browser.
 
 ## References
 
