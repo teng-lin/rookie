@@ -9,7 +9,7 @@
       "rows": [
         {
           "id": "chromium_ancestor_same_site",
-          "host_key": "third.rookie-b.test",
+          "host_key": "nested.rookie-a.test",
           "name": "chips",
           "value": "chromium_ancestor_same_site",
           "path": "/",
@@ -25,7 +25,7 @@
         },
         {
           "id": "chromium_ancestor_cross_site",
-          "host_key": "third.rookie-b.test",
+          "host_key": "nested.rookie-a.test",
           "name": "chips",
           "value": "chromium_ancestor_cross_site",
           "path": "/",
@@ -41,7 +41,7 @@
         },
         {
           "id": "chromium_ancestor_unknown",
-          "host_key": "third.rookie-b.test",
+          "host_key": "nested.rookie-a.test",
           "name": "chips",
           "value": "chromium_ancestor_unknown",
           "path": "/",
@@ -51,6 +51,54 @@
           "expires_utc": 15746918400000000,
           "top_frame_site_key": "https://rookie-a.test",
           "has_cross_site_ancestor": null,
+          "source_scheme": 2,
+          "source_port": 443,
+          "is_persistent": 1
+        },
+        {
+          "id": "chromium_ancestor_samesite_none",
+          "host_key": "nested.rookie-a.test",
+          "name": "y_none",
+          "value": "chromium_ancestor_samesite_none",
+          "path": "/",
+          "is_secure": 1,
+          "is_httponly": 0,
+          "samesite": 0,
+          "expires_utc": 15746918400000000,
+          "top_frame_site_key": null,
+          "has_cross_site_ancestor": null,
+          "source_scheme": 2,
+          "source_port": 443,
+          "is_persistent": 1
+        },
+        {
+          "id": "chromium_ancestor_samesite_strict",
+          "host_key": "nested.rookie-a.test",
+          "name": "z_strict",
+          "value": "chromium_ancestor_samesite_strict",
+          "path": "/",
+          "is_secure": 0,
+          "is_httponly": 0,
+          "samesite": 2,
+          "expires_utc": 15746918400000000,
+          "top_frame_site_key": null,
+          "has_cross_site_ancestor": null,
+          "source_scheme": 2,
+          "source_port": 443,
+          "is_persistent": 1
+        },
+        {
+          "id": "chromium_ancestor_third_party_cross_site",
+          "host_key": "third.rookie-b.test",
+          "name": "chips",
+          "value": "chromium_ancestor_third_party_cross_site",
+          "path": "/",
+          "is_secure": 1,
+          "is_httponly": 0,
+          "samesite": 0,
+          "expires_utc": 15746918400000000,
+          "top_frame_site_key": "https://rookie-a.test",
+          "has_cross_site_ancestor": 1,
           "source_scheme": 2,
           "source_port": 443,
           "is_persistent": 1
@@ -423,6 +471,18 @@
           "sameSite": 0,
           "expiry": 4102444800000,
           "originAttributes": "^futureAttr=1"
+        },
+        {
+          "id": "firefox_unknown_partitioned",
+          "host": "unknown.rookie-a.test",
+          "name": "u_partitioned",
+          "value": "firefox_unknown_partitioned",
+          "path": "/",
+          "isSecure": 1,
+          "isHttpOnly": 0,
+          "sameSite": 0,
+          "expiry": 4102444800000,
+          "originAttributes": "^partitionKey=%28https%2Crookie-a.test%29"
         }
       ],
       "jar": {
@@ -430,6 +490,7 @@
           "error": {
             "code": "isolation_loss_refused",
             "required": [
+              "top_level_site",
               "origin_attributes"
             ]
           }
@@ -460,7 +521,75 @@
   },
   "cases": [
     {
-      "id": "chromium_ancestor_explicit_same_site",
+      "id": "chromium_ancestor_derived_same_site",
+      "store": "chromium_isolated",
+      "context": {
+        "url": "https://nested.rookie-a.test/",
+        "top_level_site": "https://rookie-a.test",
+        "now": 1893456000
+      },
+      "expect": {
+        "selected": [
+          "chromium_ancestor_same_site",
+          "chromium_ancestor_samesite_none",
+          "chromium_ancestor_samesite_strict"
+        ],
+        "header": "chips=chromium_ancestor_same_site; y_none=chromium_ancestor_samesite_none; z_strict=chromium_ancestor_samesite_strict",
+        "omitted": {
+          "not_applicable": 12,
+          "partition": 1,
+          "ancestor_chain_unknown": 1
+        }
+      }
+    },
+    {
+      "id": "chromium_ancestor_explicit_cross_site_a_to_b_to_a",
+      "store": "chromium_isolated",
+      "context": {
+        "url": "https://nested.rookie-a.test/",
+        "top_level_site": "https://rookie-a.test",
+        "ancestor_chain": "cross_site",
+        "now": 1893456000
+      },
+      "expect": {
+        "selected": [
+          "chromium_ancestor_cross_site",
+          "chromium_ancestor_samesite_none"
+        ],
+        "header": "chips=chromium_ancestor_cross_site; y_none=chromium_ancestor_samesite_none",
+        "omitted": {
+          "not_applicable": 12,
+          "same_site": 1,
+          "partition": 1,
+          "ancestor_chain_unknown": 1
+        }
+      }
+    },
+    {
+      "id": "chromium_ancestor_explicit_same_site_on_same_site_request",
+      "store": "chromium_isolated",
+      "context": {
+        "url": "https://nested.rookie-a.test/",
+        "top_level_site": "https://rookie-a.test",
+        "ancestor_chain": "same_site",
+        "now": 1893456000
+      },
+      "expect": {
+        "selected": [
+          "chromium_ancestor_same_site",
+          "chromium_ancestor_samesite_none",
+          "chromium_ancestor_samesite_strict"
+        ],
+        "header": "chips=chromium_ancestor_same_site; y_none=chromium_ancestor_samesite_none; z_strict=chromium_ancestor_samesite_strict",
+        "omitted": {
+          "not_applicable": 12,
+          "partition": 1,
+          "ancestor_chain_unknown": 1
+        }
+      }
+    },
+    {
+      "id": "chromium_ancestor_explicit_same_site_clamped_to_cross_site",
       "store": "chromium_isolated",
       "context": {
         "url": "https://third.rookie-b.test/",
@@ -470,34 +599,11 @@
       },
       "expect": {
         "selected": [
-          "chromium_ancestor_same_site"
+          "chromium_ancestor_third_party_cross_site"
         ],
-        "header": "chips=chromium_ancestor_same_site",
+        "header": "chips=chromium_ancestor_third_party_cross_site",
         "omitted": {
-          "not_applicable": 11,
-          "partition": 1,
-          "ancestor_chain_unknown": 1
-        }
-      }
-    },
-    {
-      "id": "chromium_ancestor_explicit_cross_site",
-      "store": "chromium_isolated",
-      "context": {
-        "url": "https://third.rookie-b.test/",
-        "top_level_site": "https://rookie-a.test",
-        "ancestor_chain": "cross_site",
-        "now": 1893456000
-      },
-      "expect": {
-        "selected": [
-          "chromium_ancestor_cross_site"
-        ],
-        "header": "chips=chromium_ancestor_cross_site",
-        "omitted": {
-          "not_applicable": 11,
-          "partition": 1,
-          "ancestor_chain_unknown": 1
+          "not_applicable": 16
         }
       }
     },
@@ -511,13 +617,11 @@
       },
       "expect": {
         "selected": [
-          "chromium_ancestor_cross_site"
+          "chromium_ancestor_third_party_cross_site"
         ],
-        "header": "chips=chromium_ancestor_cross_site",
+        "header": "chips=chromium_ancestor_third_party_cross_site",
         "omitted": {
-          "not_applicable": 11,
-          "partition": 1,
-          "ancestor_chain_unknown": 1
+          "not_applicable": 16
         }
       }
     },
@@ -535,7 +639,7 @@
         ],
         "header": "chips=chromium_site_child_subdomain_same_site",
         "omitted": {
-          "not_applicable": 13
+          "not_applicable": 16
         }
       }
     },
@@ -553,16 +657,33 @@
         ],
         "header": "chips=chromium_site_sibling_subdomain_cross_site",
         "omitted": {
-          "not_applicable": 13
+          "not_applicable": 16
         }
       }
     },
     {
-      "id": "chromium_site_stored_key_with_port_strips_port",
+      "id": "chromium_site_stored_key_with_port_requires_matching_port",
       "store": "chromium_isolated",
       "context": {
         "url": "https://rookie-a.test/",
         "top_level_site": "https://rookie-a.test",
+        "now": 1893456000
+      },
+      "expect": {
+        "selected": [],
+        "header": "",
+        "omitted": {
+          "not_applicable": 16,
+          "partition": 1
+        }
+      }
+    },
+    {
+      "id": "chromium_site_stored_key_with_port_matches_when_port_matches",
+      "store": "chromium_isolated",
+      "context": {
+        "url": "https://rookie-a.test/",
+        "top_level_site": "https://rookie-a.test:8443",
         "now": 1893456000
       },
       "expect": {
@@ -571,7 +692,7 @@
         ],
         "header": "chips=chromium_site_stored_key_with_port",
         "omitted": {
-          "not_applicable": 13
+          "not_applicable": 16
         }
       }
     },
@@ -589,7 +710,7 @@
         ],
         "header": "chips=chromium_site_idn_host",
         "omitted": {
-          "not_applicable": 13
+          "not_applicable": 16
         }
       }
     },
@@ -607,7 +728,7 @@
         ],
         "header": "chips=chromium_site_ipv4_cross_site_row",
         "omitted": {
-          "not_applicable": 12,
+          "not_applicable": 15,
           "partition": 1
         }
       }
@@ -626,7 +747,7 @@
         ],
         "header": "chips=chromium_site_ipv6_cross_site_row",
         "omitted": {
-          "not_applicable": 12,
+          "not_applicable": 15,
           "partition": 1
         }
       }
@@ -647,7 +768,7 @@
         ],
         "header": "mid=chromium_header_deep; alpha=chromium_header_root_a; zeta=chromium_header_root_b",
         "omitted": {
-          "not_applicable": 11
+          "not_applicable": 14
         }
       }
     },
@@ -940,6 +1061,7 @@
         "error": {
           "code": "incomplete_send_context",
           "required": [
+            "top_level_site",
             "origin_attributes"
           ]
         }
@@ -950,16 +1072,18 @@
       "store": "firefox_unknown_attr",
       "context": {
         "url": "https://unknown.rookie-a.test/",
+        "top_level_site": "https://rookie-a.test",
         "origin_attributes": "^futureAttr=1",
         "now": 1893456000
       },
       "expect": {
         "selected": [
+          "firefox_unknown_default",
           "firefox_unknown_future"
         ],
-        "header": "u_future=firefox_unknown_future",
+        "header": "u_default=firefox_unknown_default; u_future=firefox_unknown_future",
         "omitted": {
-          "origin": 1
+          "partition": 1
         }
       }
     },
@@ -968,6 +1092,7 @@
       "store": "firefox_unknown_attr",
       "context": {
         "url": "https://unknown.rookie-a.test/",
+        "top_level_site": "https://rookie-a.test",
         "origin_attributes": "",
         "now": 1893456000
       },
@@ -976,6 +1101,28 @@
           "firefox_unknown_default"
         ],
         "header": "u_default=firefox_unknown_default",
+        "omitted": {
+          "partition": 1,
+          "origin": 1
+        }
+      }
+    },
+    {
+      "id": "firefox_unknown_attr_partitioned_row_survives_raw_selector",
+      "store": "firefox_unknown_attr",
+      "context": {
+        "url": "https://unknown.rookie-a.test/",
+        "top_level_site": "https://rookie-a.test",
+        "ancestor_chain": "cross_site",
+        "origin_attributes": "",
+        "now": 1893456000
+      },
+      "expect": {
+        "selected": [
+          "firefox_unknown_default",
+          "firefox_unknown_partitioned"
+        ],
+        "header": "u_default=firefox_unknown_default; u_partitioned=firefox_unknown_partitioned",
         "omitted": {
           "origin": 1
         }
@@ -998,18 +1145,21 @@
     }
   ],
   "notes": [
+    "Ancestor-chain resolution is clamped, not merely derived: resolved = cross_site if the request site differs from top_level_site, else (explicit ancestor_chain or same_site); same_site_context = sites_match && resolved==same_site. A request whose site differs from the top level cannot be a first-party frame in a real browser frame tree, so an explicit ancestor_chain=same_site there is silently clamped to cross_site rather than accepted or rejected (chromium_ancestor_explicit_same_site_clamped_to_cross_site selects the same row as the plain derived-cross-site case). An explicit ancestor_chain=cross_site on a same-site request also clears same_site_context, which is what lets a SameSite=Strict cookie be omitted even though the request and top-level site are literally the same host (chromium_ancestor_explicit_cross_site_a_to_b_to_a).",
+    "The Chromium ancestor-bit rows (same_site/cross_site/unknown) are hosted on nested.rookie-a.test, a subdomain of the top-level site, because that is the only relationship under which an explicit ancestor_chain=same_site is ever honored rather than clamped away. chromium_ancestor_third_party_cross_site models the genuinely cross-site (third-party) case on its own, single row: only bit=1 is a state a real Chromium store can produce there, since bit=0 at a cross-site host is now unreachable by any selector.",
     "IP literals (IPv4/IPv6) are exempt from the subdomain rule for ancestor_chain derivation and same_site_context: site membership requires exact host equality, never a suffix/subdomain check (ADR 0006 Decision 1).",
     "chromium_site_ipv4_same_site_row and chromium_site_ipv6_same_site_row exist to prove the exemption: a naive dot-boundary subdomain check would treat '7.198.51.100.7' as a subdomain of '198.51.100.7' (and 'ffff::1' as ending with '::1'), but exact host equality correctly derives cross_site instead, so only the *_cross_site_row is ever selected.",
-    "chromium_site_stored_key_with_port stores top_frame_site_key with an origin-style port suffix ('https://rookie-a.test:8443'); Chromium's site comparison strips the port, so it still matches a portless top_level_site.",
+    "A Chromium top_frame_site_key's port (if present, e.g. 'https://rookie-a.test:8443') must equal top_level_site's explicit port, the same rule as Firefox's partitionKey port -- it is no longer stripped/ignored. chromium_site_stored_key_with_port_requires_matching_port (top_level_site without a port) selects nothing; chromium_site_stored_key_with_port_matches_when_port_matches (top_level_site with :8443) selects the row.",
     "A Chromium partitioned row whose has_cross_site_ancestor column is NULL (chromium_ancestor_unknown) is omitted from every context regardless of the selector supplied, and is counted under ancestor_chain_unknown, never partition.",
     "Sibling subdomains (a.rookie-a.test under top-level b.rookie-a.test) stay cross-site because neither host is a subdomain of the other; a child subdomain (sub.rookie-a.test under top-level rookie-a.test) is same-site under the same rule.",
     "The demand for a selector token is computed once over the whole snapshot (every row in the store), not per case. Every case against firefox_isolated must supply all five typed tokens even when it targets a single dimension, because the store's other row groups (containers, first-party domain, gecko view session, the partition rows) collectively observe every typed token at least once.",
     "Firefox default fill applies to all four typed OriginAttributes fields whenever originAttributes is present at all (including the empty '' suffix), because Firefox omits default-valued attributes from the suffix: user_context_id=0, private_browsing_id=0, first_party_domain=\"\", gecko_view_session_context_id=\"\". A supplied selector must equal the stored value exactly, so first_party_domain=\"\" (not an omitted selector) is how a caller selects the default rows, and first_party_domain=\"no-match.test\" omits every row including the default one (firefox_attr_first_party_domain_no_match_selects_nothing).",
-    "origin_attributes performs an exact match against a row's full raw originAttributes string and is ANDed with any typed selectors also supplied; it is not scoped to rows with an unrecognized attribute name. firefox_isolated never demands it (every row there has only recognized attribute names), so its cases never supply it.",
-    "firefox_unknown_attr isolates the one case origin_attributes exists for: firefox_unknown_future's typed projection (uc=0, pb=0, fpd=\"\", gvscid=\"\") is identical to firefox_unknown_default's, so no combination of the five typed selectors can tell them apart or select either one specifically -- only the exact raw origin_attributes selector can, which is why this store demands exactly [\"origin_attributes\"] and nothing else.",
+    "The raw origin_attributes selector governs ONLY opaque rows -- a row whose originAttributes suffix carries a name this build does not recognize (or an unreadable value under a known name). An opaque row is selected iff the selector equals its stored raw suffix exactly, else omitted under origin. A non-opaque row (including one with a recognized partitionKey) ignores origin_attributes entirely and is governed by the typed selectors and the partition verdict instead; firefox_unknown_attr_partitioned_row_survives_raw_selector proves this: origin_attributes=\"\" does not collapse the partitioned row into (or exclude it from) the opaque-row comparison.",
+    "firefox_isolated never demands origin_attributes (every row there has only recognized attribute names), so its cases never supply it.",
+    "firefox_unknown_attr demands top_level_site (its partitioned row is not Unpartitioned) and origin_attributes (its future row is opaque). firefox_unknown_default's and firefox_unknown_future's typed projections are otherwise identical (uc=0, pb=0, fpd=\"\", gvscid=\"\"), so origin_attributes is the only way to select or exclude the opaque row specifically; the non-opaque partitioned row is present or absent from a case's selected set purely on the ordinary partition verdict, independent of whatever origin_attributes value is supplied.",
     "The omitted counts in every case include every row in the store, not just the rows conceptually 'in scope': a row hosted at a different domain than the request is counted not_applicable (it fails the GetFilter domain check) regardless of its isolation identity.",
     "Firefox partitionKey has no separate selector or demand token for its port or foreign-ancestor ('f') fields; both are derived from top_level_site (port) and from same_site_context + ancestor_chain (f). firefox_port_8443 and firefox_port_default differ only in the derived port; firefox_foreign_true and firefox_foreign_false differ only in the derived f bit.",
-    "firefox_foreign_true requires an explicit ancestor_chain=cross_site: with the request and top-level site both being 'rookie-a.test', the derived ancestor_chain would be same_site, and a non-empty partitionKey never matches a first-party context (same_site_context && ancestor_chain==same_site) regardless of the stored f bit.",
+    "firefox_foreign_true requires an explicit ancestor_chain=cross_site: with the request and top-level site both being 'rookie-a.test', the derived ancestor_chain would be same_site, and a non-empty partitionKey never matches a first-party context (same_site_context && ancestor_chain==same_site) regardless of the stored f bit. The same first-party guard is what excludes firefox_unknown_partitioned from firefox_unknown_attr_exact_future_suffix and firefox_unknown_attr_exact_empty_suffix, both of which leave ancestor_chain to derive same_site on a same-site (subdomain) request.",
     "jar refuses whenever the demanded-token list for the whole snapshot is non-empty, using the exact same tokens send_view's incomplete_send_context error would demand; chromium_plain and firefox_plain hold no isolated rows, so their jar is ok."
   ]
 }
