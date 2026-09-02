@@ -31,14 +31,11 @@ const corpus = JSON.parse(
 // The committed base64 store per corpus store name, plus the on-disk filename
 // each engine's sniffer expects.
 //
-// `build_isolation_corpus.py --write-node-fixtures` emits the three isolated
-// stores; the two `*_plain` fixtures were generated the same way from the same
-// corpus and are needed here because the jar verdicts are per store, and the
-// plain stores are the ones that must succeed. Until `NODE_FIXTURE_STORES` in
-// that generator lists them too, `test_build_isolation_corpus.py` does not
-// re-check them against a fresh build -- the "every corpus store has a
-// committed Node fixture" test below is what keeps this map honest in the
-// meantime.
+// `build_isolation_corpus.py --write-node-fixtures` emits one fixture per
+// store, and `test_build_isolation_corpus.py` re-checks each against a fresh
+// build, so these bytes cannot drift from `corpus.json`. The "every corpus
+// store has a committed Node fixture" test below is what keeps this map in
+// step when the corpus gains a store.
 const STORE_FIXTURES = {
   chromium_isolated: { fixture: "isolation-corpus-chromium.sqlite.base64", file: "Cookies" },
   chromium_plain: { fixture: "isolation-corpus-chromium-plain.sqlite.base64", file: "Cookies" },
@@ -80,56 +77,6 @@ const CONTEXT_KEYS = {
   origin_attributes: "originAttributes",
   now: "nowEpochSeconds",
 };
-
-// Cases where the corpus and the core disagree, each with the ADR 0006
-// sentence that settles which one is wrong.
-//
-// An entry here is a reported corpus defect, never a way to quiet a real
-// binding bug: this binding does not implement matching at all -- `sendView`
-// hands the context straight to `ReadResult::send_view` -- so a disagreement
-// here is always between the corpus and the core. `tests/isolation_corpus/`
-// is owned outside this binding, so the defect is excluded and reported
-// rather than edited away. Both entries below should shrink to nothing once
-// the corpus is corrected.
-const EXCLUDED_CASES = new Map([
-  [
-    "chromium_site_ipv4_exact_host_equality_required",
-    // The case's request URL, `https://7.198.51.100.7/`, is not a URL. A host
-    // whose last label is all-digits is parsed as an IPv4 address, and five
-    // dotted parts is not one, so WHATWG host parsing rejects it -- `new
-    // URL()` in this very process rejects it identically to the `url` crate.
-    // Every language therefore answers `invalid_url` here, and no
-    // implementation can produce the selection the case expects.
-    //
-    // ADR 0006, Decision 1: "IP literals are exempt from the subdomain rule.
-    // When either the request host or the top-level site host is an IPv4 or
-    // IPv6 literal, site membership is exact host equality, never a subdomain
-    // check". The exemption is real and is already proven by the IPv6 twin
-    // `chromium_site_ipv6_exact_host_equality_required`, which passes; only
-    // this case's chosen IPv4 spelling is unrealizable.
-    "the request URL is unparseable under WHATWG host parsing, so every language answers invalid_url",
-  ],
-  [
-    "firefox_unknown_attr_partitioned_row_survives_raw_selector",
-    // ADR 0006, Decision 1: a partitioned Firefox row "matches when `site ==
-    // top_level_site`, `port == derived top-level port`, and `f ==
-    // (same_site_context && ancestor_chain == CrossSite)`".
-    //
-    // The case sends a same-site (subdomain) request with an explicit
-    // `ancestor_chain: cross_site`, against a stored `partitionKey` of
-    // `(https,rookie-a.test)` -- no `f`. The core resolves the expected `f` as
-    // `sites_match && ancestor == CrossSite`, which is `true` here, so the row
-    // is omitted under `partition` rather than selected.
-    //
-    // The corpus's own `firefox_foreign_true_requires_explicit_cross_site_ancestor`
-    // needs that same reading to pass, and does pass: read literally, the
-    // ADR's first term (`same_site_context`) is false whenever
-    // `ancestor_chain == CrossSite`, making the conjunction constant-false and
-    // a stored `,f` row unreachable from any context. The two cases cannot
-    // both hold, so this one is the defect.
-    "expects a stored f=false partition to match a request whose derived f is true",
-  ],
-]);
 
 function toContext(context) {
   const converted = {};
@@ -175,13 +122,19 @@ function installStore(directory, storeName) {
   return path;
 }
 
-// `includeExpired: true` so every row the corpus counted reaches the snapshot:
-// the corpus's `omitted` totals cover every row in the store, and a row dropped
-// by read-time expiry would never reach the send view to be counted at all.
-// Send-time expiry still applies inside `sendView` regardless of this flag.
+// How the corpus says this store must be opened.
+//
+// `include_expired` is a per-store fact, not a convenience: `firefox_plain`
+// declares it so its already-expired row reaches the snapshot and is counted
+// under `omitted.expired`, which is the corpus's way of stating that send-time
+// expiry applies even to a row an inventory deliberately retained. Opening a
+// store that does not declare it with `includeExpired: true` would be just as
+// wrong -- the omission totals cover exactly the rows the store was opened
+// with.
 function snapshotOptions(storeName, path) {
-  const options = { path, includeExpired: true };
-  if (corpus.stores[storeName].engine === "chromium") {
+  const store = corpus.stores[storeName];
+  const options = { path, includeExpired: store.include_expired === true };
+  if (store.engine === "chromium") {
     // The corpus writes plaintext values and no `encrypted_value`, so there is
     // no key to fetch -- and asking for one would reach the host's real
     // keychain/credential store from a unit test.
@@ -214,13 +167,12 @@ test("the corpus is the shape this file assumes", (t) => {
   t.is(corpus.schema_version, 1);
   t.true(corpus.cases.length > 0);
 
-  // An exclusion that no longer names a real case is an exclusion that has
-  // outlived its defect: it must be deleted, not left silently matching
-  // nothing while a genuinely failing case slips through under the same name.
-  const ids = new Set(corpus.cases.map((entry) => entry.id));
-  for (const id of EXCLUDED_CASES.keys()) {
-    t.true(ids.has(id), `excluded case ${id} is no longer in the corpus; drop the exclusion`);
-  }
+  // Every case runs. There is no exclusion list: this binding does not
+  // implement matching -- `sendView` hands the context straight to
+  // `ReadResult::send_view` -- so a case this file cannot answer is a defect
+  // in the corpus or the core, to be fixed there rather than skipped here.
+  const cased = new Set(corpus.cases.map((entry) => entry.store));
+  t.deepEqual([...cased].sort(), Object.keys(corpus.stores).sort(), "every store has cases");
 });
 
 test("ancestorChain accepts the two corpus spellings and rejects anything else", async (t) => {
@@ -235,12 +187,80 @@ test("ancestorChain accepts the two corpus spellings and rejects anything else",
     // different partitioned rows, so a typo that fell back to the derived
     // chain would quietly answer a different question than the caller asked.
     for (const ancestorChain of ["same-site", "SameSite", "crosssite", ""]) {
-      const error = t.throws(() => snapshot.sendView({ ...base, ancestorChain }), undefined, ancestorChain);
+      const error = t.throws(
+        () => snapshot.sendView({ ...base, ancestorChain }),
+        undefined,
+        ancestorChain,
+      );
       t.is(error.code, "InvalidArg", ancestorChain);
       t.regex(error.message, /unknown ancestor chain/, ancestorChain);
+      // Deliberately only `code`. This rejection happens while converting the
+      // argument, before the core is asked anything, so it is not a classified
+      // `rookie_cookies::Error` and carries none of the structured attributes
+      // -- the same shape `resource`/`method` have had since 0.6. The
+      // asynchronous jobs differ: their loader wrapper decorates every
+      // rejection, so `kind` is always present there. Pinned here so the
+      // distinction is a decision rather than something a caller discovers.
+      t.is(error.kind, undefined, ancestorChain);
+      t.is(error.rookieCode, undefined, ancestorChain);
+      t.is(error.required, undefined, ancestorChain);
     }
   });
 });
+
+test("a send-selection fault that is not a missing selector demands nothing", async (t) => {
+  await withTempDirectory("rookie-node-corpus-required-empty-", async (directory) => {
+    const snapshot = await openStore(directory, "chromium_plain");
+
+    // `required` is a demand list, not a general diagnostic slot. A caller
+    // branching on `error.required.length` to decide whether to supply
+    // selectors must not be sent looking for one when the URL is simply
+    // malformed.
+    for (const [label, context] of [
+      ["a malformed URL", "not a url"],
+      ["a malformed top-level site", { url: "https://rookie-a.test/", topLevelSite: "nope" }],
+    ]) {
+      const error = t.throws(() => snapshot.sendView(context), undefined, label);
+      t.is(error.kind, "request", label);
+      t.is(error.code, "InvalidArg", label);
+      t.deepEqual(error.required, [], label);
+    }
+  });
+});
+
+// The clock override is the one `SendContext` field with no observable effect
+// in the corpus cases, which all share one epoch at which nothing has expired.
+// Without this, `nowEpochSeconds` could stop being forwarded to
+// `SendContext::now` -- falling back to the real wall clock -- and every
+// corpus case would still pass.
+for (const storeName of ["chromium_plain", "firefox_plain"]) {
+  test(`${storeName}: nowEpochSeconds moves the send-time expiry boundary`, async (t) => {
+    await withTempDirectory(`rookie-node-corpus-clock-${storeName}-`, async (directory) => {
+      const snapshot = await openStore(directory, storeName);
+      const url = "https://rookie-a.test/";
+
+      const live = snapshot.sendView({ url, nowEpochSeconds: corpus.clock_epoch_seconds });
+      t.is(live.cookies.length, 1, "the corpus clock selects the live row");
+
+      // The boundary is read off the selected row rather than restated here,
+      // so the test still means what it says if the corpus moves the expiry --
+      // and it names the row by selection rather than by index, since a store
+      // may also hold rows that were already expired at the corpus clock.
+      const { expires } = live.cookies[0].cookie;
+      t.is(typeof expires, "number", "the selected row must be persistent");
+      t.true(expires > corpus.clock_epoch_seconds, "and must outlive the corpus clock");
+
+      // Send-time expiry applies to a row the snapshot deliberately retained:
+      // keeping an expired cookie in an inventory is not a licence to send it.
+      // Counted relatively, so a store that already had expired rows at the
+      // corpus clock asserts the same thing as one that had none.
+      const stale = snapshot.sendView({ url, nowEpochSeconds: expires + 1 });
+      t.is(stale.cookies.length, 0);
+      t.is(stale.header, "");
+      t.is(stale.omitted.expired, live.omitted.expired + 1);
+    });
+  });
+}
 
 for (const [storeName, store] of Object.entries(corpus.stores)) {
   const cases = corpus.cases.filter((entry) => entry.store === storeName);
@@ -250,9 +270,6 @@ for (const [storeName, store] of Object.entries(corpus.stores)) {
       const snapshot = await openStore(directory, storeName);
 
       for (const entry of cases) {
-        if (EXCLUDED_CASES.has(entry.id)) {
-          continue;
-        }
         const context = toContext(entry.context);
 
         if (entry.expect.error) {
@@ -302,6 +319,8 @@ for (const [storeName, store] of Object.entries(corpus.stores)) {
         return;
       }
       const error = t.throws(() => snapshot.sendView(bare));
+      t.is(error.kind, "request");
+      t.is(error.code, "InvalidArg");
       t.is(error.rookieCode, "incomplete_send_context");
       t.deepEqual(error.required, store.jar.expect.error.required);
     });
@@ -353,7 +372,10 @@ for (const [storeName, store] of FIREFOX_JAR_STORES) {
       // and browser discovery reads the environment on that thread.
       const { stdout } = await execFileAsync(
         process.execPath,
-        [fileURLToPath(new URL("isolation-corpus-jar-child.mjs", import.meta.url))],
+        [
+          fileURLToPath(new URL("isolation-corpus-jar-child.mjs", import.meta.url)),
+          String(store.include_expired === true),
+        ],
         { env: { ...process.env, ...fixture.environment } },
       );
       const observed = JSON.parse(stdout);
@@ -362,6 +384,7 @@ for (const [storeName, store] of FIREFOX_JAR_STORES) {
         t.deepEqual(observed.refused, observed.cookies, "an unisolated jar refuses nothing");
       } else {
         t.is(observed.refused.error.kind, "request");
+        t.is(observed.refused.error.code, "InvalidArg");
         t.is(observed.refused.error.rookieCode, "isolation_loss_refused");
         t.deepEqual(observed.refused.error.required, store.jar.expect.error.required);
       }

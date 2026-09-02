@@ -6,7 +6,12 @@
 // `process.env` edits.
 import { jar, read } from "../index.js";
 
-const options = { browser: "firefox", profile: "corpus", includeExpired: true };
+// The store's own `include_expired` flag, forwarded by the parent test rather
+// than assumed here: whether an expired row belongs in the snapshot is a fact
+// about the corpus store, and `jar` must see the same snapshot `read` does for
+// the byte-identity assertion to mean anything.
+const includeExpired = process.argv[2] === "true";
+const options = { browser: "firefox", profile: "corpus", includeExpired };
 
 function describe(error) {
   return {

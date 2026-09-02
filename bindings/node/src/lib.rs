@@ -44,8 +44,12 @@ struct BindingErrorDetails {
   source_kind: Option<String>,
   target_os: Option<String>,
   path_redacted: bool,
-  /// The `SendContext` selectors `RequestError::IncompleteSendContext` says
-  /// are missing. Empty for every other error.
+  /// The selector tokens the snapshot demands: the ones
+  /// `RequestError::IncompleteSendContext` says a `SendContext` did not
+  /// supply, and the ones `RequestError::IsolationLossRefused` says a flat
+  /// projection would have needed. One vocabulary, so a caller who handles
+  /// either error's `required` already understands the other. Empty for every
+  /// other error.
   required: Vec<String>,
 }
 

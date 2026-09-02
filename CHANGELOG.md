@@ -153,8 +153,9 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   byte-for-byte `read(...).cookies`, and a snapshot with no isolated rows
   resolves either way exactly as before. `JarOptions` is every `ReadOptions`
   field plus that flag -- deliberately not on `ReadOptions` itself, where a
-  non-jar call would have silently ignored it. `snapshot.cookies` and
-  `snapshot.detailedCookies` are unaffected.
+  non-jar call would have silently ignored it; `read` and `fromPath` reject
+  the flag by name, before any I/O, rather than accepting and dropping it.
+  `snapshot.cookies` and `snapshot.detailedCookies` are unaffected.
 
 ### Fixed
 

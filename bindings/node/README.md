@@ -64,7 +64,9 @@ const flat = await jar({ browser: "firefox", allowIsolationLoss: true });
 
 `allowIsolationLoss` lives on `JarOptions` only, never on `ReadOptions` — a
 `read` call has nothing to lose, so accepting the flag there would mean
-silently ignoring it. The opt-in changes only whether a call can fail; a
+silently ignoring it. Passing it to `read` or `fromPath` rejects by name
+before any I/O, in the type system and at run time. The opt-in changes only
+whether a call can fail; a
 successful `jar({ ..., allowIsolationLoss: true })` is byte-for-byte
 `read({ ... }).cookies`. A snapshot with no isolated rows resolves either way,
 exactly as before.
@@ -194,6 +196,13 @@ try {
 `invalid_top_level_site`, and `clock_unrepresentable` are the other
 send-selection request faults; all of them throw synchronously, since the
 snapshot is already loaded.
+
+One shape to know: a rejection raised while *reading the argument* — an
+`ancestorChain` that is not one of the two spellings, a `resource` or `method`
+that is not one of theirs — carries only `code` (`"InvalidArg"`) and a
+message. It never reached the core, so there is nothing for it to have
+classified, and `kind`, `rookieCode`, and `required` are absent rather than
+null. Every rejection from an `await`ed job carries the full set.
 
 ## Reports
 
@@ -516,7 +525,7 @@ method answers the question they were being misused for.
 | --- | --- | --- |
 | Send selection | `snapshot.header(url \| SendContextObject)` | `snapshot.sendView(...)` returns the selected records, the header, and `omitted`; `header` is `sendView(...).header` |
 | `jar` | Always flattened | Rejects with `isolation_loss_refused` on an isolated snapshot; `allowIsolationLoss: true` is the opt-in |
-| `jar` options | `ReadOptions` | `JarOptions` — every `ReadOptions` field plus `allowIsolationLoss` |
+| `jar` options | `ReadOptions` | `JarOptions` — every `ReadOptions` field plus `allowIsolationLoss`, which `read`/`fromPath` reject rather than ignore |
 | Selectors | `topLevelSite`, `userContextId`, `privateBrowsingId` | plus `ancestorChain`, `firstPartyDomain`, `geckoViewSessionContextId`, `originAttributes` |
 | `required` | Populated for `incomplete_send_context` | Also for `isolation_loss_refused`, from the same six-token vocabulary |
 

@@ -775,6 +775,58 @@ test("bad async API arguments reject instead of throwing synchronously", async (
   }
 });
 
+test("allowIsolationLoss is rejected on the jobs that cannot honour it", async (t) => {
+  // `read` and `fromPath` return a snapshot that keeps every isolated
+  // identity, so there is nothing for the flag to allow. Accepting and
+  // ignoring it would be exactly the silent flatten the fail-closed jar was
+  // introduced to remove, and it would fail invisibly: the caller believes
+  // they opted in, and every call still succeeds. It is rejected by name,
+  // before any I/O -- so this test needs no browser and no fixture.
+  const rejected = [
+    ["read", () => rookieCookies.read({ browser: "firefox", allowIsolationLoss: true })],
+    ["fromPath", () => rookieCookies.fromPath({ path: "/nonexistent", allowIsolationLoss: false })],
+  ];
+
+  for (const [name, call] of rejected) {
+    let promise;
+    t.notThrows(() => {
+      promise = call();
+    }, `${name} must reject rather than throw synchronously`);
+    const error = await t.throwsAsync(promise, undefined, `${name} must reject`);
+    t.is(error.kind, "request", name);
+    t.is(error.code, "InvalidArg", name);
+    // The fault is in the call, not in anything the core classified, so there
+    // is no rookieCode -- the same shape an unknown `extractFromPath` option
+    // produces.
+    t.is(error.rookieCode, null, name);
+    t.deepEqual(error.required, [], name);
+    t.regex(error.message, /allowIsolationLoss/, name);
+    t.regex(error.message, /jar/, name);
+  }
+
+  // Present-but-false is still present: a caller who wrote it on the wrong
+  // job has the same misconception either way, and silently accepting the
+  // "harmless" spelling teaches them the option belongs there.
+  await t.throwsAsync(rookieCookies.read({ browser: "firefox", allowIsolationLoss: false }));
+
+  // Nothing else changed about these jobs: an ordinary options object still
+  // reaches the native layer and fails on its own merits.
+  const ordinary = await t.throwsAsync(rookieCookies.read({ browser: "no-such-browser" }));
+  t.is(ordinary.rookieCode, "unknown_browser");
+});
+
+test("jar rejects a non-boolean allowIsolationLoss instead of coercing it", async (t) => {
+  // N-API converts `JarOptions` before the task is scheduled, so a truthy
+  // string never reaches the isolation-loss decision. That matters: `"yes"`
+  // coerced to `true` would turn a typo into a silent opt-in to flattening
+  // scoped credentials.
+  const error = await t.throwsAsync(
+    rookieCookies.jar({ browser: "firefox", allowIsolationLoss: "yes" }),
+  );
+  t.is(error.kind, "request");
+  t.is(error.code, "BooleanExpected");
+});
+
 test.serial("Firefox profiles can be listed and selected asynchronously", async (t) => {
   const temp = mkdtempSync(join(tmpdir(), "rookie-node-firefox-"));
   const fixture = firefoxFixtureRoot(temp);
@@ -863,12 +915,27 @@ test("finite profile selections stay finite in generated declarations", (t) => {
   const types = readFileSync(new URL("../index.d.ts", import.meta.url), "utf8");
   const readOptions = types.match(/export interface ReadOptions \{[\s\S]*?\n\}/)?.[0];
   const reportOptions = types.match(/export interface ReportOptions \{[\s\S]*?\n\}/)?.[0];
+  // JarOptions repeats every ReadOptions field, so it repeats this one too.
+  // napi-rs sees a plain Option<String> and emits `select?: string` for each
+  // of them independently; a retype added for one interface and forgotten for
+  // another is invisible at run time and only shows up as a consumer's `"all"`
+  // typechecking against a job that always rejects it.
+  const jarOptions = types.match(/export interface JarOptions \{[\s\S]*?\n\}/)?.[0];
   t.truthy(readOptions);
   t.truthy(reportOptions);
+  t.truthy(jarOptions);
   t.true(readOptions.includes("select?: 'legacy_first'"));
+  t.true(jarOptions.includes("select?: 'legacy_first'"));
   t.true(reportOptions.includes("select?: 'legacy_first' | 'all'"));
   t.false(readOptions.includes("select?: string"));
+  t.false(jarOptions.includes("select?: string"));
   t.false(reportOptions.includes("select?: string"));
+
+  // The one field that must NOT be repeated: a `read` caller who passes it
+  // has misunderstood what the flag does, and the type surface is where they
+  // should find that out.
+  t.true(jarOptions.includes("allowIsolationLoss?: boolean"));
+  t.false(readOptions.includes("allowIsolationLoss"));
 });
 
 test("canonical direct-path declarations and compatibility deprecations are exact", (t) => {

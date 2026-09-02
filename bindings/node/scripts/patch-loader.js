@@ -444,6 +444,41 @@ function extractFromPathNative(nativeFunction, name) {
   )
 }
 
+// \`allowIsolationLoss\` is a decision only \`jar\` can act on. \`read\` and
+// \`fromPath\` return a snapshot that keeps every isolated identity, so there is
+// nothing there for the flag to allow -- accepting and ignoring it would be
+// exactly the silent failure the fail-closed jar exists to remove. It is
+// rejected by name, before any I/O, the same way an unknown extractFromPath
+// option is: a request-kind TypeError carrying no rookieCode, since the fault
+// is in the call rather than in anything the core classified.
+function rejectAllowIsolationLoss(options, functionName) {
+  if (
+    options !== null
+    && typeof options === 'object'
+    && !Array.isArray(options)
+    && Object.prototype.hasOwnProperty.call(options, 'allowIsolationLoss')
+  ) {
+    const error = new TypeError(
+      functionName + ' does not accept allowIsolationLoss; it is a jar option. '
+        + 'A snapshot keeps every isolated identity, so there is nothing to allow. '
+        + 'Use jar({ ..., allowIsolationLoss: true }) for the flat projection.'
+    )
+    error.code = 'InvalidArg'
+    throw error
+  }
+  return options
+}
+
+// The snapshot-returning jobs: same (options, cancellation) shape, and the
+// same one option neither of them may be handed.
+function snapshotNative(nativeFunction, name) {
+  const required = requiredNative(nativeFunction, name)
+  return asyncNative(
+    (options, cancellation) => required(rejectAllowIsolationLoss(options, name), cancellation),
+    name
+  )
+}
+
 function unsupportedPlatform(name, supportedPlatform) {
   return () => Promise.reject(new Error(
     \`\${name} is only available on \${supportedPlatform}; current platform is \${platform}\`
@@ -496,11 +531,11 @@ module.exports.browserProfiles = asyncNative(browserProfiles, 'browserProfiles')
 module.exports.browserReport = asyncNative(browserReport, 'browserReport')
 module.exports.loadReport = asyncNative(loadReport, 'loadReport')
 module.exports.ReadResult = requiredNative(ReadResult, 'ReadResult')
-module.exports.read = asyncNative(read, 'read')
+module.exports.read = snapshotNative(read, 'read')
 module.exports.jar = asyncNative(jar, 'jar')
 module.exports.profiles = asyncNative(profiles, 'profiles')
 module.exports.report = asyncNative(report, 'report')
-module.exports.fromPath = asyncNative(fromPath, 'fromPath')
+module.exports.fromPath = snapshotNative(fromPath, 'fromPath')
 
 if (testWorkerPanic) {
   module.exports.__testWorkerPanic = asyncNative(testWorkerPanic, 'testWorkerPanic')

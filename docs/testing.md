@@ -108,6 +108,14 @@ npm run test:worker-panic
 time. `test:worker-panic` needs the `test-support` feature, so build with
 `npm run build:test` when running it.
 
+`npm run typecheck` compiles `index.d.ts` **and**
+`__test__/typing/consumer.ts`, a consumer-perspective file that ava never
+runs: it asserts at compile time which options belong to which job (a
+`@ts-expect-error` on `read({ allowIsolationLoss })`, a positive
+`jar({ allowIsolationLoss })`) and exercises every `SendContextObject`
+selector. `tsc` fails on an unused `@ts-expect-error`, so a rejection that
+silently starts compiling fails the build.
+
 Ignored real-browser Rust tests (`rookie-rs/tests/e2e_chrome.rs`,
 `e2e_firefox.rs`) only run when CI (or you) seeds a profile and passes
 `--ignored`. Do not treat a local `cargo test` as Chrome/Firefox coverage.
