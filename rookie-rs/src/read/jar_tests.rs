@@ -219,7 +219,9 @@ fn a_row_whose_origin_attributes_cannot_be_read_counts_as_isolated() {
         ..CookieContext::default()
       },
     )]);
-    let error = result.jar().expect_err("{suffix} is isolated");
+    let Err(error) = result.jar() else {
+      panic!("{suffix} is isolated");
+    };
     assert_eq!(error.code(), "isolation_loss_refused", "{suffix}");
     let (isolated_rows, required) = refusal(&error);
     assert_eq!(isolated_rows, 1, "{suffix}");

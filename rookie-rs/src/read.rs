@@ -11,8 +11,8 @@ use crate::error::map_job_result;
 use crate::execution::{AppBoundPolicy, ExecutionControl};
 use crate::header_filter::{redact_url, same_site_permits, sendable_octets, GetFilter};
 use crate::isolation::{
-  demanded_selectors, isolated_rows, missing_selectors, partition_identity, IsolationLoss,
-  PartitionIdentity, RequestIsolation, StoredIsolation,
+  check_isolation_loss, missing_selectors, partition_identity, IsolationLoss, PartitionIdentity,
+  RequestIsolation, StoredIsolation,
 };
 use crate::read_warning::{ReadWarningCode, ReadWarningCounts};
 use crate::report;
@@ -326,23 +326,10 @@ impl ReadResult {
   }
 
   fn isolation_loss_check(&self, loss: IsolationLoss) -> anyhow::Result<()> {
-    if matches!(loss, IsolationLoss::Allow) {
-      return Ok(());
-    }
-    let required = demanded_selectors(&self.isolation);
-    if required.is_empty() {
-      return Ok(());
-    }
     // The refusal does not ask which context the caller meant. Any isolated
     // row makes a flat list ambiguous, and the tokens are the same vocabulary
     // `incomplete_send_context` uses so one handler covers both.
-    Err(
-      RequestError::IsolationLossRefused {
-        isolated_rows: isolated_rows(&self.isolation),
-        required: required.into_iter().map(str::to_owned).collect(),
-      }
-      .into(),
-    )
+    check_isolation_loss(&self.isolation, loss).map_err(Into::into)
   }
 
   /// Borrows the snapshot's native records, isolation intact.

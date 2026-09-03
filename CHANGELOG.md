@@ -218,12 +218,12 @@ caller who has already decided isolation loss is acceptable.
   printed before. `--format detailed` carries the context and is never
   refused, so it needs no flag.
 
-  `from-path --domains` is covered by the same policy. That route runs a job
-  which returns cookies directly, with no snapshot for the jar to refuse from,
-  so the CLI opens the path a second time purely to ask the policy question and
-  discards the result. The flat job itself is untouched and its output is
-  byte-identical; what changes is that an isolated store now refuses there too,
-  instead of leaving one route where a merged list still printed.
+  `from-path --domains` is covered by the same policy. Its one
+  `extract_from_path` acquisition retains the detailed rows long enough to
+  check isolation, then projects those exact rows to the flat result. A browser
+  write cannot land between separate policy and output reads. Successful
+  output remains byte-identical; an isolated selected row now refuses there
+  too instead of leaving one route where a merged list still printed.
 - Read-warning text now reads `N rows affected (code)` rather than
   `skipped N rows (code)`, in Rust, Python, and Node alike. Not every warning
   code drops a row: `unparsable_partition_key` and `unknown_ancestor_chain`

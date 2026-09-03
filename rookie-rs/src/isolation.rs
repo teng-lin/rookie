@@ -549,6 +549,29 @@ pub(crate) fn isolated_rows(stored: &[StoredIsolation]) -> u64 {
     .unwrap_or(u64::MAX)
 }
 
+/// Refuses a flat projection when it would discard observed isolation.
+///
+/// Snapshot jars and the domain-filtered direct-path compatibility job call
+/// this same check. Keeping the decision here means the latter can acquire,
+/// check, and project one detailed row set instead of reopening a mutable
+/// browser database between its policy decision and its output.
+pub(crate) fn check_isolation_loss(
+  stored: &[StoredIsolation],
+  loss: IsolationLoss,
+) -> Result<(), RequestError> {
+  if matches!(loss, IsolationLoss::Allow) {
+    return Ok(());
+  }
+  let required = demanded_selectors(stored);
+  if required.is_empty() {
+    return Ok(());
+  }
+  Err(RequestError::IsolationLossRefused {
+    isolated_rows: isolated_rows(stored),
+    required: required.into_iter().map(str::to_owned).collect(),
+  })
+}
+
 /// Supplies an attribute's default, but only when the name never appeared.
 ///
 /// A name that appeared with a value this build could not read stays `None`:

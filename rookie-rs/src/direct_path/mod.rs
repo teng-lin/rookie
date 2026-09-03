@@ -26,6 +26,7 @@ use windows as platform;
 
 use crate::enums::{Cookie, DetailedCookie};
 use crate::execution::{AppBoundPolicy, ExecutionControl};
+use crate::isolation::{check_isolation_loss, IsolationLoss, StoredIsolation};
 use crate::RequestError;
 use anyhow::Result;
 use std::fmt;
@@ -305,6 +306,7 @@ pub struct PathExtractRequest {
   pub(crate) target: PathTarget,
   pub(crate) domains: Option<Vec<String>>,
   pub(crate) control: ExecutionControl,
+  isolation_loss: IsolationLoss,
 }
 
 /// Crate-private state shared by both path jobs, so the credential check and
@@ -366,6 +368,10 @@ impl PathExtractRequest {
       },
       domains: None,
       control: ExecutionControl::default(),
+      // `extract_from_path` is the 0.6 flat compatibility API, so its default
+      // remains byte-for-byte permissive. Send-oriented callers such as the
+      // CLI select `Refuse` explicitly.
+      isolation_loss: IsolationLoss::Allow,
     }
   }
 
@@ -373,6 +379,18 @@ impl PathExtractRequest {
   /// prior restriction on `None`.
   pub fn domains(mut self, domains: Option<Vec<String>>) -> Self {
     self.domains = domains;
+    self
+  }
+
+  /// Selects whether this flat extraction may discard cookie isolation.
+  ///
+  /// The default is [`IsolationLoss::Allow`] for compatibility with the 0.6
+  /// `extract_from_path` contract. A caller producing send-oriented output
+  /// should select [`IsolationLoss::Refuse`]. The check and flat projection
+  /// then use the same acquired detailed row set, so a concurrent source
+  /// change cannot pass one operation and appear in the other.
+  pub fn isolation_loss(mut self, loss: IsolationLoss) -> Self {
+    self.isolation_loss = loss;
     self
   }
 
@@ -501,19 +519,42 @@ pub fn extract_from_path(request: PathExtractRequest) -> crate::Result<Vec<Cooki
 }
 
 pub(crate) fn extract_from_path_inner(request: PathExtractRequest) -> Result<Vec<Cookie>> {
+  extract_from_path_inner_with(request, || {})
+}
+
+/// Acquires once, then checks and projects that immutable detailed row set.
+///
+/// The callback is a no-op in production. Tests use it to mutate the source at
+/// the exact point where the CLI used to perform a second acquisition, proving
+/// that a later row can affect only a later request.
+fn extract_from_path_inner_with(
+  request: PathExtractRequest,
+  after_acquire: impl FnOnce(),
+) -> Result<Vec<Cookie>> {
+  let loss = request.isolation_loss;
+  let detailed = detailed_from_path_inner(request)?
+    .into_iter()
+    // A7 applies here for the same reason it applies to `extract`: a row
+    // whose host did not survive decode would otherwise be handed back as
+    // `Cookie { domain: "", .. }`, which matches nothing and belongs to no
+    // site. The filter lives here rather than in `detailed_from_path_inner`
+    // because `from_path` calls that seam and does its own omission *with*
+    // a warning count; a bare `Vec<Cookie>` has no channel to report the
+    // count through, which is the stated cost of this shape.
+    .filter(|detailed| {
+      crate::browser::cookie_record::host_identity_survives(&detailed.cookie.domain)
+    })
+    .collect::<Vec<_>>();
+
+  after_acquire();
+  let isolation = detailed
+    .iter()
+    .map(|cookie| StoredIsolation::from_context(&cookie.context))
+    .collect::<Vec<_>>();
+  check_isolation_loss(&isolation, loss)?;
   Ok(
-    detailed_from_path_inner(request)?
+    detailed
       .into_iter()
-      // A7 applies here for the same reason it applies to `extract`: a row
-      // whose host did not survive decode would otherwise be handed back as
-      // `Cookie { domain: "", .. }`, which matches nothing and belongs to no
-      // site. The filter lives here rather than in `detailed_from_path_inner`
-      // because `from_path` calls that seam and does its own omission *with*
-      // a warning count; a bare `Vec<Cookie>` has no channel to report the
-      // count through, which is the stated cost of this shape.
-      .filter(|detailed| {
-        crate::browser::cookie_record::host_identity_survives(&detailed.cookie.domain)
-      })
       .map(DetailedCookie::into_cookie)
       .collect(),
   )
@@ -1027,6 +1068,56 @@ mod tests {
     assert_eq!(cookies.len(), 1);
     assert_eq!(cookies[0].name, "portable");
     assert_eq!(cookies[0].value, "mozilla");
+  }
+
+  #[test]
+  fn isolation_policy_and_projection_share_one_acquired_row_set() {
+    let (_directory, path) = mozilla_database();
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    connection
+      .execute(
+        "ALTER TABLE moz_cookies ADD COLUMN originAttributes TEXT NOT NULL DEFAULT ''",
+        [],
+      )
+      .unwrap();
+    drop(connection);
+
+    let request = PathExtractRequest::sniff(&path)
+      .domains(Some(vec!["example.test".to_owned()]))
+      .isolation_loss(IsolationLoss::Refuse);
+    let cookies = extract_from_path_inner_with(request, || {
+      // This is the old CLI race boundary: its first acquisition had passed
+      // the policy gate, then a browser could insert an isolated row before
+      // the second acquisition produced flat output.
+      let connection = rusqlite::Connection::open(&path).unwrap();
+      connection
+        .execute(
+          "INSERT INTO moz_cookies \
+           (host, path, isSecure, expiry, name, value, isHttpOnly, sameSite, originAttributes) \
+           VALUES ('.example.test', '/', 1, 0, 'isolated', 'later', 1, 0, \
+                   '^userContextId=7')",
+          [],
+        )
+        .unwrap();
+    })
+    .expect("a later source write cannot change the already acquired snapshot");
+    assert_eq!(cookies.len(), 1);
+    assert_eq!(cookies[0].name, "portable");
+
+    // A new request does see the row. Compatibility stays permissive by
+    // default, while the send-oriented policy refuses it.
+    let compatible = extract_from_path(
+      PathExtractRequest::sniff(&path).domains(Some(vec!["example.test".to_owned()])),
+    )
+    .expect("the 0.6 compatibility default remains permissive");
+    assert_eq!(compatible.len(), 2);
+    let error = extract_from_path(
+      PathExtractRequest::sniff(&path)
+        .domains(Some(vec!["example.test".to_owned()]))
+        .isolation_loss(IsolationLoss::Refuse),
+    )
+    .expect_err("a fresh request must refuse the newly observed isolated row");
+    assert_eq!(error.code(), "isolation_loss_refused");
   }
 
   #[test]

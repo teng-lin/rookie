@@ -164,7 +164,7 @@ fn parse_ancestor_chain(value: &str) -> rookie_cookies::AncestorChain {
 /// Decision 1 lists them. A flag left off is genuinely absent, not a default:
 /// that distinction is what stops one container's cookies from answering
 /// another's request.
-fn send_context(send: SendContextArgs) -> rookie_cookies::SendContext {
+fn send_context(send: SendContextArgs) -> std::io::Result<rookie_cookies::SendContext> {
   let mut context = rookie_cookies::SendContext::url(send.url);
   if let Some(site) = send.top_level_site {
     context = context.top_level_site(site);
@@ -194,9 +194,17 @@ fn send_context(send: SendContextArgs) -> rookie_cookies::SendContext {
     context = context.origin_attributes(attributes);
   }
   if let Some(now) = send.now {
-    context = context.now(std::time::UNIX_EPOCH + std::time::Duration::from_secs(now));
+    let now = std::time::UNIX_EPOCH
+      .checked_add(std::time::Duration::from_secs(now))
+      .ok_or_else(|| {
+        std::io::Error::new(
+          std::io::ErrorKind::InvalidInput,
+          "--now is outside this platform's SystemTime range",
+        )
+      })?;
+    context = context.now(now);
   }
-  context
+  Ok(context)
 }
 
 /// Reads the snapshot a send-selecting subcommand renders from, emitting its
@@ -399,34 +407,13 @@ fn run_job_command(command: JobCommand) -> Result<(), Box<dyn std::error::Error>
       let credentials = chromium_credential_selector(local_state_path, browser_id, plaintext_only)?;
       match domains {
         Some(domains) => {
-          // `--domains` runs `extract_from_path`, which returns the flat
-          // eight-field projection directly -- there is no snapshot in that
-          // job for the fail-closed jar to refuse from. Rather than leave a
-          // route where an isolated store prints a merged list, the same
-          // path is opened a second time through `from_path` purely to ask
-          // the policy question, and that snapshot is discarded. The double
-          // open is deliberate and confined to this compatibility-only
-          // route; the printed bytes still come from the flat job, so the
-          // output is unchanged from before the gate existed.
-          //
-          // The gate reads with `include_expired(true)` regardless of the
-          // flag: `extract_from_path` never filters by expiry, so anything
-          // less would let an *expired* isolated row slip past a gate that
-          // could not see it.
-          let mut gate = rookie_cookies::FromPathRequest::new(path.clone())
-            .include_expired(true)
-            .execution(execution_control(
-              timeout_secs,
-              app_bound.clone(),
-              cancellation.clone(),
-            ));
-          if let Some(credentials) = credentials.clone() {
-            gate = gate.chromium_credentials(credentials);
-          }
-          rookie_cookies::from_path(gate)?.into_jar_with(isolation_loss(allow_isolation_loss))?;
-
+          // `extract_from_path` acquires detailed rows, applies the loss
+          // policy to that exact immutable row set, and only then projects it
+          // to the eight-field compatibility list. A browser write therefore
+          // cannot land between a separate policy read and output read.
           let request = path_extract_request(path, credentials)?
             .domains(Some(domains))
+            .isolation_loss(isolation_loss(allow_isolation_loss))
             .execution(execution_control(timeout_secs, app_bound, cancellation));
           let cookies = extract_from_path(request)?;
           print_flat_cookies(&format, cookies);
@@ -446,12 +433,14 @@ fn run_job_command(command: JobCommand) -> Result<(), Box<dyn std::error::Error>
       }
     }
     JobCommand::Header { send, snapshot } => {
+      let context = send_context(send)?;
       let result = read_snapshot(snapshot)?;
-      print_line_or_exit(&result.header(&send_context(send))?);
+      print_line_or_exit(&result.header(&context)?);
     }
     JobCommand::SendView { send, snapshot } => {
+      let context = send_context(send)?;
       let result = read_snapshot(snapshot)?;
-      let view = result.send_view(&send_context(send))?;
+      let view = result.send_view(&context)?;
       print_line_or_exit(&serde_json::to_string_pretty(&send_view_document(&view))?);
     }
     JobCommand::Browsers => {
@@ -659,6 +648,35 @@ mod tests {
 
       assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
     }
+  }
+
+  fn send_args(now: Option<u64>) -> SendContextArgs {
+    SendContextArgs {
+      url: "https://example.test/".to_owned(),
+      top_level_site: None,
+      resource: None,
+      method: None,
+      user_context_id: None,
+      private_browsing_id: None,
+      ancestor_chain: None,
+      first_party_domain: None,
+      gecko_view_session_context_id: None,
+      origin_attributes: None,
+      now,
+    }
+  }
+
+  #[test]
+  fn send_context_rejects_a_time_outside_system_time_range() {
+    let error = send_context(send_args(Some(u64::MAX)))
+      .expect_err("large --now must be an ordinary error, not a SystemTime addition panic");
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    assert!(error.to_string().contains("--now"));
+  }
+
+  #[test]
+  fn send_context_preserves_representable_now() {
+    send_context(send_args(Some(0))).expect("the Unix epoch is representable");
   }
 
   #[test]

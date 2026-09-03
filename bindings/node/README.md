@@ -175,13 +175,15 @@ Beyond `topLevelSite`, `userContextId`, and `privateBrowsingId`, a
   Firefox `OriginAttributes` equality fields. Once supplied, a row that does
   not carry the attribute is not a match.
 - `originAttributes` — the verbatim stored Firefox suffix, and the only way to
-  select an **opaque** row: one carrying an attribute name this build does not
-  know, or a `partitionKey` it cannot parse. Such a row is omitted from every
-  send view, because an identity that cannot be read is never assumed to be
-  the default context. Pass the value straight from
+  select an **opaque Firefox** row: one carrying an attribute name this build
+  does not know, or a `partitionKey` it cannot parse. Such a row is omitted
+  unless this selector equals its suffix byte-for-byte; it is never assumed to
+  be the default context. Pass the value straight from
   `detailedCookies[i].context.originAttributes`; the comparison is byte
   equality against what the browser stored. It governs opaque rows only, so
-  one future-Firefox row cannot collapse the rest of the snapshot.
+  one future-Firefox row cannot collapse the rest of the snapshot. An
+  unparsable Chromium key has no raw suffix to name and remains omitted from
+  every send view.
 
 A supplied selector that matches nothing omits rows; it never throws. Only a
 *missing* one is an error.

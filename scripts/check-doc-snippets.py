@@ -463,7 +463,7 @@ def main() -> int:
             repo / "bindings" / "node" / "README.md",
             ("Recommended usage (0.6 series)", "0.5.6 API", "Migrate 0.5.6"),
         ),
-        (repo / "rookie-rs" / "README.md", ("Recommended usage (0.6 series)", "0.5.6 API", "Migrate 0.5.6")),
+        (repo / "rookie-rs" / "README.md", ("Recommended usage (0.7 series)", "0.5.6 API", "Migrate 0.5.6")),
     )
     for path, needles in required_headings:
         text = path.read_text(encoding="utf-8")

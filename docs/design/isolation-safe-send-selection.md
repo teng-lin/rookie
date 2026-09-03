@@ -266,7 +266,9 @@ code `isolation_loss_refused`. Free `jar(request)` is
 
 ```python
 class ReadResult:
-    def send_view(self, context: SendContextMapping | str) -> SendViewDict: ...
+    # Abbreviated: context is optional when url= is supplied, and the method
+    # accepts the same keyword selector surface as header().
+    def send_view(self, context: SendContextMapping | str | None = None, /, **selectors) -> SendViewDict: ...
     def compatibility_cookies(self, *, allow_isolation_loss: bool = False) -> list[Cookie]: ...
     def as_jar(self, *, allow_isolation_loss: bool = False) -> http.cookiejar.CookieJar: ...
 
@@ -322,8 +324,9 @@ with its own CLI test.
 - **Location:** `tests/isolation_corpus/` (top level, deliberately not under
   `tests/e2e/`, whose discovery and `browser_coverage.json` contract concern
   real browsers, not synthetic collision fixtures).
-- **Shape:** `corpus.json` with four named stores (`chromium_isolated`,
-  `chromium_plain`, `firefox_isolated`, `firefox_plain`), a fixed
+- **Shape:** `corpus.json` with five named stores (`chromium_isolated`,
+  `chromium_plain`, `firefox_isolated`, `firefox_unknown_attr`,
+  `firefox_plain`), a fixed
   `clock_epoch_seconds`, and `cases[]`. Every seeded row's `value == id` so a
   case can assert identity by id alone. Each case names a snake_case
   `context` and an `expect` — either ordered `selected` ids plus `header`
@@ -455,10 +458,11 @@ did not have to wait on a real-browser lane:
 - Should `from-path --domains` gain the new selector surface, or stay
   documented as compatibility-only indefinitely? Still deferred (ADR 0006
   "Out of scope"), but the route is no longer an isolation-loss bypass:
-  PR 3b (`7770ec3`) made it open the path a second time through `from_path`
-  and call `into_jar_with` purely as a policy gate, discarding that snapshot
-  before running the flat job. Its printed bytes are unchanged; what changes
-  is that an isolated store is now refused there too unless
+  PR 3b (`7770ec3`) initially gated it with a second `from_path` read. Review
+  replaced that TOCTOU-prone route with one `extract_from_path` acquisition:
+  the loss policy checks the acquired detailed rows and the flat projection
+  consumes those same rows. Its printed bytes are unchanged; what changes is
+  that an isolated selected row is refused there too unless
   `--allow-isolation-loss` is passed. The open question is only whether the
   route should gain selectors, not whether it should be gated.
 - Should the Firefox port-partitioning lane (a non-default-port top-level

@@ -632,7 +632,7 @@ fn flat_formats_fail_closed_and_opt_in_per_store() {
         let opted_in = stdout_of(&allowed_context, &allowed);
         assert_rows_present(&allowed_context, &opted_in, &values);
 
-        // The gate decides whether the job runs; it never edits the bytes.
+        // The policy decides whether the job runs; it never edits the bytes.
         // On a store with nothing to refuse, the flag is therefore a no-op,
         // which pins that the opted-in output is the pre-gate output.
         if !refuses {
@@ -670,10 +670,10 @@ fn flat_formats_fail_closed_and_opt_in_per_store() {
 
 /// The two `from-path` routes to a flat projection.
 ///
-/// `Domains` runs `extract_from_path`, which returns the eight-field list
-/// directly and has no snapshot to refuse from -- the CLI gates it by opening
-/// the same path a second time. Both must reach the same verdict, or the
-/// compatibility route is a way around the policy.
+/// `Domains` runs `extract_from_path`, which now checks the detailed rows from
+/// its one acquisition before projecting those same rows to eight fields.
+/// Both routes must reach the same verdict, or the compatibility route is a
+/// way around the policy.
 #[derive(Clone, Copy, Debug)]
 enum FlatRoute {
   Snapshot,

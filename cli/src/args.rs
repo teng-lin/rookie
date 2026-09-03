@@ -75,9 +75,8 @@ pub struct SendContextArgs {
   #[arg(long)]
   pub origin_attributes: Option<String>,
   /// Send-time expiry clock, in Unix epoch seconds. Defaults to now.
-  /// Capped at `i64::MAX` because `SystemTime` addition panics past it --
-  /// clap rejects an out-of-range value as a usage error before any I/O,
-  /// rather than after the snapshot has already been read
+  /// Capped at `i64::MAX`; the command also checks the platform's narrower
+  /// `SystemTime` range before any snapshot I/O
   #[arg(long, value_parser = clap::value_parser!(u64).range(..=i64::MAX as u64))]
   pub now: Option<u64>,
 }

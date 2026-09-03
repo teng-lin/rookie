@@ -27,7 +27,7 @@ cargo add rookie-cookies
 > `.app_bound(AppBoundPolicy::Disabled)` to perform no App-Bound process work;
 > `v20` rows will then be omitted with a warning.
 
-## Recommended usage (0.6 series)
+## Recommended usage (0.7 series)
 
 ```rust
 use rookie_cookies::{read, ReadRequest, SendContext};

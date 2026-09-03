@@ -289,6 +289,7 @@ pub fn rookie_cookies::direct_path::PathExtractRequest::app_bound(self, rookie_c
 pub fn rookie_cookies::direct_path::PathExtractRequest::cancellation(self, rookie_cookies::CancellationHandle) -> Self
 pub fn rookie_cookies::direct_path::PathExtractRequest::domains(self, core::option::Option<alloc::vec::Vec<alloc::string::String>>) -> Self
 pub fn rookie_cookies::direct_path::PathExtractRequest::execution(self, rookie_cookies::ExecutionControl) -> Self
+pub fn rookie_cookies::direct_path::PathExtractRequest::isolation_loss(self, rookie_cookies::IsolationLoss) -> Self
 pub fn rookie_cookies::direct_path::PathExtractRequest::locked_database_policy(self, rookie_cookies::direct_path::ChromiumLockedDatabasePolicy) -> Self
 pub fn rookie_cookies::direct_path::PathExtractRequest::plaintext(impl core::convert::Into<std::path::PathBuf>) -> Self
 pub fn rookie_cookies::direct_path::PathExtractRequest::sniff(impl core::convert::Into<std::path::PathBuf>) -> Self

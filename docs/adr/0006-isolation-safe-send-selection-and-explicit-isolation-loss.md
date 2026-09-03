@@ -168,21 +168,20 @@ default fill.
 non-default value for that dimension. `None` and `Some(0)` container ids
 never demand a token — that would make `header()` unusable against every
 store that lacks the column. An `Unparsable` partition key demands
-`top_level_site` even though supplying it does not make the row sendable —
-the row is omitted (counted `unparsable_partition_key`) regardless of the
-selector. The demand exists so the snapshot's other, parsable partitioned
-rows are not silently sent as if the unparsable one were absent: a caller
-who has not supplied `top_level_site` at all cannot tell isolated rows apart
-from unpartitioned ones, so the demand surfaces the unparsable row's
-existence rather than letting it disappear into a context it does not
-belong to. Any unrecognized attribute name demands `origin_attributes` on
-the same logic. One escape hatch exists for Firefox rows only: an exact
-`origin_attributes` selector equal to the row's raw suffix satisfies the
-partition gate as well, because the suffix names the partition verbatim —
-so a well-formed key this build does not model (a legacy bare-`baseDomain`
-`partitionKey`, or a `moz-extension` top-level scheme) is reachable by naming
-it, while still counted `unparsable_partition_key` at read time. Chromium
-rows carry no raw suffix, so an unparsable Chromium key stays unreachable.
+`top_level_site`, but that selector alone cannot identify the row: the send
+view omits it under `unparsable_partition_key`. The demand exists so the
+snapshot's other, parsable partitioned rows are not silently sent as if the
+unparsable one were absent. Any unrecognized attribute name demands
+`origin_attributes` on the same logic. Firefox has one exact-match escape
+hatch: when `origin_attributes` equals the row's raw suffix, it names an
+unparsable partition verbatim and the send view may select that row. This does
+not remove the snapshot's `unparsable_partition_key` **read warning**; read
+warnings describe stored input, whereas `SendOmissions` counts only rows the
+particular send view left out. Thus a selected legacy bare-`baseDomain`
+`partitionKey` (or a `moz-extension` top-level scheme) still contributes the
+read warning and contributes no send omission. Chromium rows carry no raw
+suffix, so an unparsable Chromium key stays unreachable and is omitted from
+every send view.
 
 **A supplied selector that matches nothing omits; it never errors.** Once
 every demanded token is present in the context, `send_view`/`header` never
@@ -224,11 +223,13 @@ semantic change to already-shipped SameSite behavior this ADR makes: a
 request to `www.example.com` with `top_level_site=https://example.com` was
 `CrossSite` before this ADR and is `SameSite` after it; two sibling
 subdomains (`a.example.com` embedded under `b.example.com`) stay `CrossSite`
-either way, because neither is a subdomain of the other. The rule only
-widens: it never withholds a cookie the old literal-equality rule would have
-sent, and it only adds cookies that were previously withheld because the
-request host was a child subdomain of the top-level site rather than an
-exact match. It replaces the retired test
+either way, because neither is a subdomain of the other. The subdomain
+membership change by itself only widens: it adds cookies previously withheld
+because the request host was a child of the top-level host. The full 0.7
+selector can also narrow: an explicit `ancestor_chain(CrossSite)` withholds
+`SameSite=Lax` and `SameSite=Strict` cookies even when the request and
+top-level sites match, as the A→B→A case above requires. It replaces the
+retired test
 `a_sibling_subdomain_is_cross_site_because_there_is_no_public_suffix_list`
 with sibling-stays-cross-site and child-becomes-same-site cases (see
 Decision 4 for why this remains sound without a public-suffix list).
