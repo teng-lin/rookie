@@ -17,6 +17,13 @@ from urllib.parse import parse_qs, urlparse
 
 ALLOWED_TOP_HOSTS = frozenset({"top.rookie-a.test", "other.rookie-c.test"})
 ALLOWED_THIRD_HOST = "third.rookie-b.test"
+# Same registrable site as top.rookie-a.test, a different host. That is what
+# makes the ancestor chain observable at all: an iframe on this host embedded
+# directly under top.rookie-a.test has a same-site ancestor chain, while the
+# same host reached through third.rookie-b.test (A -> B -> A) has a cross-site
+# one, and the two differ in nothing else a cookie store records.
+ALLOWED_NESTED_HOST = "nested.rookie-a.test"
+ANCESTOR_CHAINS = frozenset({"same_site", "cross_site"})
 STRESS_HOST_PATTERN = re.compile(r"seed\.rookie-(?P<index>[0-7])\.test\Z")
 # Write churn has its own registrable domains so it exercises a live browser
 # database without rewriting any identity in the exact-set oracle.
@@ -79,6 +86,49 @@ class ContextCookieHandler(BaseHTTPRequestHandler):
             # after headers are accepted; the Set-Cookie write already landed.
             pass
 
+    def request_port(self) -> int | None:
+        """Return the port this server is bound to.
+
+        The ancestor-chain pages embed sibling origins served by this same
+        disposable process, so their port is the socket's own -- not something
+        a query parameter carries and not something the Host header can be
+        trusted to spell, which keeps a client from steering an embed.
+        """
+
+        address = self.server.server_address
+        if not isinstance(address, tuple) or len(address) < 2:
+            return None
+        port = address[1]
+        return port if isinstance(port, int) and 1 <= port <= 65535 else None
+
+    def validated_origin(self, raw: str, expected_host: str) -> str | None:
+        """Return a normalized controlled origin, or None if it is not one.
+
+        Every origin this server echoes into a page comes from a query
+        parameter, so it is re-derived from the parsed host and port rather
+        than reflected: an attacker-controlled string can then only fail the
+        allow-list, never reach the document.
+        """
+
+        parsed = urlparse(raw)
+        try:
+            port = parsed.port
+        except ValueError:
+            return None
+        if (
+            parsed.scheme != "https"
+            or parsed.hostname != expected_host
+            or parsed.username is not None
+            or parsed.password is not None
+            or port is None
+            or parsed.path
+            or parsed.params
+            or parsed.query
+            or parsed.fragment
+        ):
+            return None
+        return f"https://{expected_host}:{port}"
+
     def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler contract
         parsed = urlparse(self.path)
         host = self.host()
@@ -99,27 +149,13 @@ class ContextCookieHandler(BaseHTTPRequestHandler):
                 self.send_body(HTTPStatus.BAD_REQUEST, "invalid top host\n")
                 return
             query = parse_qs(parsed.query)
-            third_origin = query.get("third_origin", [""])[0]
             engine = query.get("engine", [""])[0]
-            parsed_third = urlparse(third_origin)
-            try:
-                third_port = parsed_third.port
-            except ValueError:
-                third_port = None
-            if (
-                parsed_third.scheme != "https"
-                or parsed_third.hostname != ALLOWED_THIRD_HOST
-                or parsed_third.username is not None
-                or parsed_third.password is not None
-                or third_port is None
-                or parsed_third.path
-                or parsed_third.params
-                or parsed_third.query
-                or parsed_third.fragment
-            ):
+            third_origin = self.validated_origin(
+                query.get("third_origin", [""])[0], ALLOWED_THIRD_HOST
+            )
+            if third_origin is None:
                 self.send_body(HTTPStatus.BAD_REQUEST, "invalid third origin\n")
                 return
-            third_origin = f"https://{ALLOWED_THIRD_HOST}:{third_port}"
             if engine not in {"chromium", "firefox"}:
                 self.send_body(HTTPStatus.BAD_REQUEST, "invalid browser engine\n")
                 return
@@ -143,6 +179,104 @@ addEventListener("message", (event) => {{
                 content_type="text/html; charset=utf-8",
                 cookies=(
                     f"rookie_top=top-{partition}; Secure; HttpOnly; SameSite=Lax; Path=/; Max-Age=3600",
+                ),
+            )
+            return
+
+        if parsed.path == "/chain-top":
+            # Only the A site hosts the ancestor-chain page: the whole point is
+            # that both iframes end up on a host of *this* site, once through a
+            # same-site chain and once through a cross-site one.
+            if host != "top.rookie-a.test":
+                self.send_body(HTTPStatus.BAD_REQUEST, "invalid chain-top host\n")
+                return
+            port = self.request_port()
+            if port is None:
+                self.send_body(HTTPStatus.BAD_REQUEST, "invalid chain-top port\n")
+                return
+            nested_origin = f"https://{ALLOWED_NESTED_HOST}:{port}"
+            third_origin = f"https://{ALLOWED_THIRD_HOST}:{port}"
+            body = f"""<!doctype html>
+<meta charset="utf-8">
+<title>ancestor-pending</title>
+<iframe id="direct" src="{nested_origin}/set-ancestor?chain=same_site"></iframe>
+<iframe id="relay" src="{third_origin}/relay"></iframe>
+<script>
+const origins = {{
+  same_site: {json.dumps(nested_origin)},
+  cross_site: {json.dumps(third_origin)},
+}};
+const pending = new Set(Object.keys(origins));
+addEventListener("message", (event) => {{
+  const data = event.data;
+  if (!data || data.kind !== "rookie-ancestor-set") return;
+  if (origins[data.chain] !== event.origin) return;
+  pending.delete(data.chain);
+  if (pending.size === 0) document.title = "ancestor-seeded";
+}});
+</script>
+"""
+            self.send_body(
+                HTTPStatus.OK, body, content_type="text/html; charset=utf-8"
+            )
+            return
+
+        if parsed.path == "/relay":
+            # The B hop of A -> B -> A. It sets no cookie of its own; it exists
+            # only to put a cross-site ancestor between the top-level A page and
+            # the A-site iframe below it.
+            if host != ALLOWED_THIRD_HOST:
+                self.send_body(HTTPStatus.BAD_REQUEST, "invalid relay host\n")
+                return
+            port = self.request_port()
+            if port is None:
+                self.send_body(HTTPStatus.BAD_REQUEST, "invalid relay port\n")
+                return
+            nested_origin = f"https://{ALLOWED_NESTED_HOST}:{port}"
+            body = f"""<!doctype html>
+<meta charset="utf-8">
+<title>relay-pending</title>
+<iframe id="nested" src="{nested_origin}/set-ancestor?chain=cross_site"></iframe>
+<script>
+addEventListener("message", (event) => {{
+  const data = event.data;
+  if (event.origin !== {json.dumps(nested_origin)}) return;
+  if (!data || data.kind !== "rookie-ancestor-set") return;
+  if (data.chain !== "cross_site") return;
+  document.title = "relay-forwarded";
+  parent.postMessage(data, "*");
+}});
+</script>
+"""
+            self.send_body(
+                HTTPStatus.OK, body, content_type="text/html; charset=utf-8"
+            )
+            return
+
+        if parsed.path == "/set-ancestor":
+            if host != ALLOWED_NESTED_HOST:
+                self.send_body(HTTPStatus.BAD_REQUEST, "invalid nested host\n")
+                return
+            chain = parse_qs(parsed.query).get("chain", [""])[0]
+            if chain not in ANCESTOR_CHAINS:
+                self.send_body(HTTPStatus.BAD_REQUEST, "invalid ancestor chain\n")
+                return
+            body = f"""<!doctype html>
+<meta charset="utf-8">
+<title>ancestor-set</title>
+<script>parent.postMessage({{kind: "rookie-ancestor-set", chain: {json.dumps(chain)}}}, "*");</script>
+"""
+            # Identical name, host, and path in both chains. The only thing that
+            # can keep these two apart in a cookie store is the ancestor bit
+            # (Chromium `has_cross_site_ancestor`, Firefox's `,f` tuple field),
+            # which is exactly the identity this lane exists to prove.
+            self.send_body(
+                HTTPStatus.OK,
+                body,
+                content_type="text/html; charset=utf-8",
+                cookies=(
+                    f"rookie_ancestor=ancestor-{chain}; Secure; SameSite=None; "
+                    "Partitioned; Path=/; Max-Age=3600",
                 ),
             )
             return

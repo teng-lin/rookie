@@ -1,7 +1,9 @@
 // Assert detailed partition identity and header isolation through the Node API.
 
 import { readFile, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import process from "node:process";
+import { fileURLToPath } from "node:url";
 
 import * as rookieCookies from "../../bindings/node/index.js";
 import { verifyCookieRecords } from "./cookie_manifest.mjs";
@@ -14,6 +16,7 @@ const [
   otherTopOrigin,
   thirdOrigin,
   sourcePortArg,
+  nestedOrigin,
   output,
 ] = process.argv.slice(2);
 
@@ -23,12 +26,26 @@ if (
   !topOrigin ||
   !otherTopOrigin ||
   !thirdOrigin ||
-  !sourcePortArg
+  !sourcePortArg ||
+  !nestedOrigin
 ) {
   console.error(
-    "usage: node assert_partitioned_context.mjs <chromium|firefox> <db> <browser-id-or-dash> <top-origin> <other-top-origin> <third-origin> <source-port> [output]",
+    "usage: node assert_partitioned_context.mjs <chromium|firefox> <db> <browser-id-or-dash> <top-origin> <other-top-origin> <third-origin> <source-port> <nested-origin> [output]",
   );
   process.exit(2);
+}
+
+const inventory = JSON.parse(
+  await readFile(
+    join(
+      dirname(fileURLToPath(import.meta.url)),
+      "partition_context_inventory.json",
+    ),
+    "utf8",
+  ),
+).engines[engine];
+if (!inventory) {
+  throw new Error(`partition_context_inventory.json has no ${engine} entry`);
 }
 
 const sourcePort = Number(sourcePortArg);
@@ -58,11 +75,7 @@ for (const record of detailed) {
   values.push(record);
   byName.set(record.cookie.name, values);
 }
-const expectedCounts = new Map([
-  ["rookie_top", 2],
-  ["rookie_chips", 3],
-]);
-if (engine === "firefox") expectedCounts.set("rookie_dfpi", 2);
+const expectedCounts = new Map(Object.entries(inventory.raw_rows_by_name));
 if (
   byName.size !== expectedCounts.size ||
   [...expectedCounts].some(
@@ -84,6 +97,16 @@ if (rawManifestPath) {
     detailed,
     `Node ${engine} raw context`,
   );
+  // The manifest carries the send contexts, so this is the one place the
+  // runner's idea of the nested origin and the oracle's can be compared.
+  const nested = rawManifest.expected_send_views.find(
+    (view) => view.name === "nested_derived",
+  ).context.url;
+  if (!String(nested).startsWith(`${nestedOrigin}/`)) {
+    throw new Error(
+      `manifest nested context ${nested} is not on ${nestedOrigin}`,
+    );
+  }
 }
 
 function exactlyTwo(name) {
@@ -261,6 +284,7 @@ if (
 }
 
 let missingSelector;
+let missingRequired;
 try {
   snapshot.header({
     url: `${thirdOrigin}/echo`,
@@ -271,6 +295,147 @@ try {
 } catch (error) {
   if (error.rookieCode !== "incomplete_send_context") throw error;
   missingSelector = error.rookieCode;
+  // The tokens, not just the code: `required` is what a caller reads to know
+  // which selector it has to obtain before retrying.
+  missingRequired = error.required;
+}
+if (rawManifest) {
+  const expected = rawManifest.expected_missing_selector;
+  if (
+    missingSelector !== expected.code ||
+    JSON.stringify(missingRequired ?? []) !== JSON.stringify(expected.required)
+  ) {
+    throw new Error(
+      `missing selector named ${missingSelector}/${JSON.stringify(missingRequired)}, expected ${expected.code}/${JSON.stringify(expected.required)}`,
+    );
+  }
+}
+
+// The two A-site rows share a name, host, and path; only the ancestor bit can
+// separate them, so the binding losing that field is invisible anywhere else.
+const ancestors = byName.get("rookie_ancestor") || [];
+const ancestorValues = ancestors.map(({ cookie }) => cookie.value).sort();
+if (
+  JSON.stringify(ancestorValues) !==
+  JSON.stringify(["ancestor-cross_site", "ancestor-same_site"])
+) {
+  throw new Error(
+    `the two ancestor-chain rows did not survive as distinct values: ${JSON.stringify(ancestorValues)}`,
+  );
+}
+for (const record of ancestors) {
+  const isCross = record.cookie.value === "ancestor-cross_site";
+  if (engine === "chromium") {
+    if (record.context.hasCrossSiteAncestor !== isCross) {
+      throw new Error(
+        `${record.cookie.value} carried hasCrossSiteAncestor=${record.context.hasCrossSiteAncestor}`,
+      );
+    }
+  } else if (String(record.context.partitionKey ?? "").endsWith(",f)") !== isCross) {
+    throw new Error(
+      `${record.cookie.value} carried partitionKey ${record.context.partitionKey}`,
+    );
+  }
+}
+
+function toSendContext(context) {
+  const camel = (key) =>
+    key.replace(/_([a-z])/g, (_match, letter) => letter.toUpperCase());
+  return Object.fromEntries(
+    Object.entries(context).map(([key, value]) => [camel(key), value]),
+  );
+}
+
+function omissionCount(omitted, reason) {
+  const camel = reason.replace(/_([a-z])/g, (_match, letter) =>
+    letter.toUpperCase(),
+  );
+  const value = omitted[camel];
+  if (!Number.isInteger(value)) {
+    throw new Error(`send view omission ${reason} was ${value}`);
+  }
+  return value;
+}
+
+// The oracle and the binding read the same stored rows, so a shared misreading
+// would make them agree on an empty set and leave every partition claim
+// vacuous. These floors are written out by hand and cannot go quiet.
+function applySendViewFloors(name, floors, records, rendered) {
+  if (!floors) return;
+  const missing = (floors.at_least || []).filter(
+    (token) => !rendered.includes(token),
+  );
+  if (missing.length) {
+    throw new Error(
+      `send view ${name} did not select the required ${JSON.stringify(missing)}; it selected ${JSON.stringify(rendered)}`,
+    );
+  }
+  for (const [cookieName, expected] of Object.entries(
+    floors.exact_values_by_name || {},
+  )) {
+    const actual = records
+      .filter(({ cookie }) => cookie.name === cookieName)
+      .map(({ cookie }) => cookie.value)
+      .sort();
+    if (JSON.stringify(actual) !== JSON.stringify([...expected].sort())) {
+      throw new Error(
+        `send view ${name} selected ${cookieName} values ${JSON.stringify(actual)}, expected exactly ${JSON.stringify([...expected].sort())}`,
+      );
+    }
+  }
+}
+
+const sendViews = {};
+if (rawManifest) {
+  const crossSite = rawManifest.expected_send_views.find(
+    (view) => view.name === "top_cross_site",
+  );
+  if ((crossSite.expected_omitted_min.same_site ?? 0) < 1) {
+    throw new Error(
+      "the explicit cross-site context must have a SameSite=Lax row to omit",
+    );
+  }
+  if (crossSite.expected.length) {
+    throw new Error(
+      `declaring a same-site request cross-site must withhold its Lax rows, but the oracle still selects ${crossSite.expected.length}`,
+    );
+  }
+  const floors = inventory.send_view_floors || {};
+  for (const view of rawManifest.expected_send_views) {
+    const actual = snapshot.sendView(toSendContext(view.context));
+    const records = actual.cookies.filter(({ cookie }) =>
+      cookie.name.startsWith("rookie_"),
+    );
+    verifyCookieRecords(
+      rawManifestPath,
+      "detailed",
+      records,
+      `Node ${engine} send view`,
+      view.name,
+    );
+    const rendered = tokens(actual.header);
+    if (JSON.stringify(rendered) !== JSON.stringify([...view.header_tokens].sort())) {
+      throw new Error(
+        `send view ${view.name} rendered ${JSON.stringify(rendered)}, expected ${JSON.stringify([...view.header_tokens].sort())}`,
+      );
+    }
+    for (const [reason, minimum] of Object.entries(view.expected_omitted_min)) {
+      const counted = omissionCount(actual.omitted, reason);
+      if (counted < minimum) {
+        throw new Error(
+          `send view ${view.name} counted ${counted} ${reason} omissions, expected at least ${minimum}`,
+        );
+      }
+    }
+    applySendViewFloors(view.name, floors[view.name], records, rendered);
+    sendViews[view.name] = rendered;
+  }
+  const unchecked = Object.keys(floors).filter((name) => !(name in sendViews));
+  if (unchecked.length) {
+    throw new Error(
+      `${engine} declares floors for send views the manifest never ran: ${JSON.stringify(unchecked.sort())}`,
+    );
+  }
 }
 
 const result = {
@@ -283,6 +448,7 @@ const result = {
     otherTopLevelSite: other,
     missingSelector,
   },
+  sendViews,
 };
 const encoded = `${JSON.stringify(result, null, 2)}\n`;
 if (output) {

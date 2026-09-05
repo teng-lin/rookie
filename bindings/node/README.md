@@ -4,8 +4,10 @@ Extract cookies from local browsers on Linux, macOS, and Windows.
 
 This file is the **JavaScript guide** (npm landing page and repo tutorial).
 Rust stays in [`rookie-rs/README.md`](https://github.com/teng-lin/rookie-cookies/blob/main/rookie-rs/README.md).
-The recommended 0.6 entry is `read`
-([ADR 0004](https://github.com/teng-lin/rookie-cookies/blob/main/docs/adr/0004-read-is-the-recommended-entry.md)).
+The recommended entry is `read`, then `sendView` for anything you intend
+to send
+([ADR 0004](https://github.com/teng-lin/rookie-cookies/blob/main/docs/adr/0004-read-is-the-recommended-entry.md),
+[ADR 0006](https://github.com/teng-lin/rookie-cookies/blob/main/docs/adr/0006-isolation-safe-send-selection-and-explicit-isolation-loss.md)).
 Package metadata and `version()` identify the installed build.
 
 **Node.js ≥ 22** (tested 22, 24, 26). Every extraction export returns a
@@ -23,31 +25,63 @@ npm install rookie-cookies
 ## Recommended usage (0.6 series)
 
 ```js
-import { jar, read } from "rookie-cookies";
+import { read } from "rookie-cookies";
 
-const cookies = await jar({
+// Gecko session import — profile selection and session policy are independent
+const snapshot = await read({
   browser: "firefox",
   profile: "default-release",
   includeSession: true,
 });
+console.log(snapshot.warnings);
 
-const snapshot = await read({
-  browser: "chrome",
-  profile: "Work",
+// A browsing context in; the cookies it selects, the header they render to,
+// and a count of what was left out and why.
+const view = snapshot.sendView({
+  url: "https://app.example.com/",
+  topLevelSite: "https://example.com",
 });
-console.log(cookies, snapshot.warnings);
-console.log(snapshot.header("https://example.com/"));
+console.log(view.header, view.omitted.partition);
+
+// `snapshot.cookies` is the inventory projection. The flat jar job is
+// compatibility only: it refuses an isolated snapshot unless
+// `allowIsolationLoss: true` names the loss.
+console.log(snapshot.cookies.length);
 ```
 
 Pass `profile` to select one discovered profile. `read` never URL-filters.
-There is **no** top-level `header()` — call `ReadResult.header(url)` on the
+There is **no** top-level `header()` or `sendView()` — call them on the
 snapshot.
 
 `jar(options)` is `read(options).cookies` projection sugar: it returns a flat
-`CookieObject[]` and discards warnings and partition/container context. Node
-has no standard-library cookie-jar class; pass the returned records to the HTTP
-client or cookie-store library you use. Choose `read` when you need diagnostics,
-isolation-aware records, or the built-in header view.
+`CookieObject[]`, discards warnings, and has no cell that could carry partition
+or container identity. Node has no standard-library cookie-jar class; pass the
+returned records to the HTTP client or cookie-store library you use. Choose
+`read` when you need diagnostics, isolation-aware records, or the built-in send
+view.
+
+**Since 0.7, `jar` fails closed** rather than dropping that identity silently.
+A snapshot holding any CHIPS-partitioned or
+Firefox-container cookie rejects with
+`rookieCode === "isolation_loss_refused"` rather than flattening scoped
+credentials into a list that looks like it belongs everywhere. Either name a
+browsing context with `read(...).sendView(...)`, or pass
+`allowIsolationLoss: true` to say a flat list is acceptable anyway:
+
+```js
+import { jar } from "rookie-cookies";
+
+const flat = await jar({ browser: "firefox", allowIsolationLoss: true });
+```
+
+`allowIsolationLoss` lives on `JarOptions` only, never on `ReadOptions` — a
+`read` call has nothing to lose, so accepting the flag there would mean
+silently ignoring it. Passing it to `read` or `fromPath` rejects by name
+before any I/O, in the type system and at run time. The opt-in changes only
+whether a call can fail; a
+successful `jar({ ..., allowIsolationLoss: true })` is byte-for-byte
+`read({ ... }).cookies`. A snapshot with no isolated rows resolves either way,
+exactly as before.
 
 - No-profile `await read({ browser: "chrome" })` matches legacy `chrome()`
   (persistent / legacy-eligible cookies).
@@ -65,46 +99,127 @@ isolation-aware records, or the built-in header view.
 
 `snapshot.warnings` items carry a stable `code`: `decrypt_failed`,
 `row_read_failed`, `invalid_octets`, `malformed_host_identity` (a row's host
-could not be parsed as a valid domain), and `unparsable_partition_key` (a
-Firefox `partitionKey` value did not match the expected shape). Branch on
-`code`, not `message`, which is diagnostic text only.
+could not be parsed as a valid domain), `unparsable_partition_key` (a
+Firefox `partitionKey` value did not match the expected shape), and
+`unknown_ancestor_chain` (a partitioned Chromium row whose
+`has_cross_site_ancestor` bit the store did not record). The last two count
+rows the snapshot *keeps* and no send context can select, which is why the
+projected `message` reads `N rows affected (code)` rather than "skipped".
+Branch on `code`, not `message`, which is diagnostic text only.
 
 Named helpers (`chrome()`, `brave()`, `load()`) still work and also return
 Promises. They are the compatibility bridge from
 [`thewh1teagle/rookie`](https://github.com/thewh1teagle/rookie) / `@rookie-rs/api`
-and will break in a later major version. Prefer `read` / `jar` for new code.
+and will break in a later major version. Prefer `read` plus `sendView` for
+new code.
 
-## Isolation: detailed cookies and the header view
+## Isolation: detailed cookies and the send view
 
-`snapshot.cookies` is the legacy eight-field projection, which merges every
-partition/container of a domain into one answer. `snapshot.detailedCookies`
+`snapshot.cookies` is the legacy eight-field projection: it discards each
+cookie's partition/container identity, so rows differing only by partition or
+container become indistinguishable, and a downstream jar keyed by domain,
+path, and name keeps only one of them. (The crate itself maps one `Cookie`
+per `DetailedCookie`, with no dedupe — the collision happens downstream, in
+whatever jar or store the caller feeds the array into.) `snapshot.detailedCookies`
 keeps that identity instead: the same eight `Cookie` fields plus a `context`
 object (`topFrameSiteKey`, `hasCrossSiteAncestor`, `sourceScheme`,
 `sourcePort`, `isPersistent`, `originAttributes`, `userContextId`,
 `partitionKey`, `privateBrowsingId`; every field nullable, since cookie
 schemas vary by browser).
 
-`ReadResult.header` takes either a bare URL string (sugar for `{ url }`,
-matching the conservative `Subresource`/`Safe` defaults) or a `SendContext`:
+`ReadResult.sendView` is **the** send-selection operation. It takes either a
+bare URL string (sugar for `{ url }`, matching the conservative
+`Subresource`/`Safe` defaults) or a `SendContextObject`, and returns the
+selected records, the rendered header, and a count of what was left out:
 
 ```js
 import { read } from "rookie-cookies";
 
 const snapshot = await read({ browser: "chrome", profile: "Default" });
-const value = snapshot.header({
+const view = snapshot.sendView({
   url: "https://example.com/",
   topLevelSite: "https://example.com",
   resource: "navigation",
   method: "safe",
 });
+console.log(view.header, view.cookies.length, view.omitted.partition);
 ```
 
+`ReadResult.header(context)` is exactly `sendView(context).header`; it renders
+from the same selection rather than repeating the match, so the two can never
+disagree. Use `header` when a request-header string is all you need, and
+`sendView` when the records or the reasons matter. An empty selection is a
+legitimate answer, not an error — `omitted` is how you tell "this context has
+no cookies" apart from "everything was excluded".
+
+`view.omitted` always carries all seven reasons, zeroes included:
+`expired`, `notApplicable` (the RFC 6265 domain/path/`Secure` rules),
+`sameSite`, `partition`, `ancestorChainUnknown` (a partitioned Chromium row
+whose store never recorded `has_cross_site_ancestor`), `unparsablePartitionKey`,
+and `origin` (a container or origin-attribute mismatch). Each row is counted
+once, under the first stage it failed.
+
+### Selectors
+
+Beyond `topLevelSite`, `userContextId`, and `privateBrowsingId`, a
+`SendContextObject` carries four selectors added in 0.7:
+
+- `ancestorChain: "same_site" | "cross_site"` — omit it and the chain is
+  *derived*: same-site when the request site is within `topLevelSite`,
+  cross-site otherwise. Set it to describe an `A → B → A` embed, whose request
+  site and top-level site are equal even though an ancestor frame is
+  cross-site. Both engines put this bit in the partition key, and it also
+  makes the request cross-site for `SameSite=Lax`/`Strict`. Any other string
+  rejects with `code === "InvalidArg"`.
+- `firstPartyDomain` and `geckoViewSessionContextId` — the two remaining
+  Firefox `OriginAttributes` equality fields. Once supplied, a row that does
+  not carry the attribute is not a match.
+- `originAttributes` — the verbatim stored Firefox suffix, and the only way to
+  select an **opaque Firefox** row: one carrying an attribute name this build
+  does not know, or a `partitionKey` it cannot parse. Such a row is omitted
+  unless this selector equals its suffix byte-for-byte; it is never assumed to
+  be the default context. Pass the value straight from
+  `detailedCookies[i].context.originAttributes`; the comparison is byte
+  equality against what the browser stored. It governs opaque rows only, so
+  one future-Firefox row cannot collapse the rest of the snapshot. An
+  unparsable Chromium key has no raw suffix to name and remains omitted from
+  every send view.
+
+A supplied selector that matches nothing omits rows; it never throws. Only a
+*missing* one is an error.
+
 A snapshot holding any CHIPS-partitioned or Firefox-container cookie rejects
-with `rookieCode === "incomplete_send_context"` (its `required` array names
-the missing selector: `top_level_site`, `user_context_id`, or
-`private_browsing_id`) instead of silently merging isolated cookies into one
-answer. `invalid_top_level_site` and `clock_unrepresentable` are the other
-two `header`-specific request faults.
+with `rookieCode === "incomplete_send_context"` instead of silently merging
+isolated cookies into one answer. Its `required` array names the missing
+selectors, in a stable order: `top_level_site`, `user_context_id`,
+`private_browsing_id`, `first_party_domain`,
+`gecko_view_session_context_id`, `origin_attributes`. The same vocabulary
+appears on `isolation_loss_refused`, so one handler covers both:
+
+```js
+import { read } from "rookie-cookies";
+
+const snapshot = await read({ browser: "firefox" });
+try {
+  console.log(snapshot.header("https://example.com/"));
+} catch (error) {
+  if (error.rookieCode === "incomplete_send_context") {
+    console.log("supply:", error.required);
+  }
+}
+```
+
+`required` is empty for every other code. `invalid_url`,
+`invalid_top_level_site`, and `clock_unrepresentable` are the other
+send-selection request faults; all of them throw synchronously, since the
+snapshot is already loaded.
+
+One shape to know: a rejection raised while *reading the argument* — an
+`ancestorChain` that is not one of the two spellings, a `resource` or `method`
+that is not one of theirs — carries only `code` (`"InvalidArg"`) and a
+message. It never reached the core, so there is nothing for it to have
+classified, and `kind`, `rookieCode`, and `required` are absent rather than
+null. Every rejection from an `await`ed job carries the full set.
 
 ## Reports
 
@@ -319,10 +434,14 @@ Current `stopReason` values are `timed_out`, `cancelled`, and
 `resource_exhausted`; treat the property as an open string for forward
 compatibility.
 Ambiguous profile errors also carry opaque `profileIds`; direct-path errors
-carry `sourceKind`, `targetOs`, and a `pathRedacted` flag. An
-`incomplete_send_context` error additionally carries `required: string[]` —
-the missing `SendContext` selector names (`top_level_site`,
-`user_context_id`, `private_browsing_id`); empty on every other error.
+carry `sourceKind`, `targetOs`, and a `pathRedacted` flag. The two send-selection
+codes — `incomplete_send_context` and `isolation_loss_refused` — additionally
+carry `required: string[]`, drawn from one six-token vocabulary
+(`top_level_site`, `user_context_id`, `private_browsing_id`,
+`first_party_domain`, `gecko_view_session_context_id`, `origin_attributes`).
+For the first it is the selectors the call did not receive; for the second,
+the ones a `sendView`/`header` call would need for that snapshot. It is empty
+on every other error.
 Human-readable `message` text remains diagnostic only. A `ReadResult`
 warning whose Rust `u64` count exceeds JavaScript's `Number.MAX_SAFE_INTEGER`
 sets `countersSaturated: true` while clamping `count` (an IEEE-754 `number`,
@@ -417,6 +536,36 @@ const all = load();
 4. Move explicit DB paths off `*Based` / `anyBrowser`.
 5. Inspect `.status` / `.code` for `InvalidArg` vs `GenericFailure`.
 6. Do not invent a top-level `header()`; pass a `SendContext` once any snapshot might hold isolated cookies.
+
+## Migrating to 0.7
+
+Nothing is renamed. `read`, `header`, `snapshot.cookies`,
+`snapshot.detailedCookies`, `jar`, and every named helper keep their names.
+What changes: `jar` can now fail, `header` splits contexts it used to merge,
+and `sendView` is the new method that answers what `jar` was often being
+misused for.
+
+| Area | 0.6 | 0.7 |
+| --- | --- | --- |
+| Send selection | `snapshot.header(url \| SendContextObject)` | `snapshot.sendView(...)` returns the selected records, the header, and `omitted`; `header` is `sendView(...).header` |
+| `jar` | Always flattened | Rejects with `isolation_loss_refused` on an isolated snapshot; `allowIsolationLoss: true` is the opt-in |
+| `jar` options | `ReadOptions` | `JarOptions` — every `ReadOptions` field plus `allowIsolationLoss`, which `read`/`fromPath` reject rather than ignore |
+| Selectors | `topLevelSite`, `userContextId`, `privateBrowsingId` | plus `ancestorChain`, `firstPartyDomain`, `geckoViewSessionContextId`, `originAttributes` |
+| `required` | Populated for `incomplete_send_context` | Also for `isolation_loss_refused`, from the same six-token vocabulary |
+| Same-site | Literal host equality | A request host that is a subdomain of `topLevelSite`'s host is now same-site, so `SameSite=Lax`/`Strict` rows it used to withhold are selected. Sibling subdomains stay cross-site; IP literals still need an exact match |
+
+1. Leave `read`, `snapshot.cookies`, and `snapshot.detailedCookies` alone —
+   none of them changed. `cookies` is still the infallible *inventory*
+   projection.
+2. Audit each `jar(...)` call. Against an unpartitioned snapshot it behaves
+   exactly as before. Against an isolated one, decide which you meant: a
+   specific browsing context (`read(...).sendView(...)`) or a flat list you
+   have accepted the loss on (`allowIsolationLoss: true`).
+3. Handle `isolation_loss_refused` wherever you already handle
+   `incomplete_send_context`; `error.required` reads the same on both.
+4. A `header` call that used to merge a partitioned snapshot into one answer
+   now splits it. Where you previously guessed a context, supply the
+   selectors `required` names.
 
 See [CHANGELOG.md](https://github.com/teng-lin/rookie-cookies/blob/main/CHANGELOG.md).
 

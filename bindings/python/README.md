@@ -4,8 +4,10 @@ Extract cookies from local browsers on Linux, macOS, and Windows.
 
 This file is the **Python guide** (PyPI landing page and repo tutorial). Rust
 stays in [`rookie-rs/README.md`](https://github.com/teng-lin/rookie-cookies/blob/main/rookie-rs/README.md).
-The recommended 0.6 entry is `jar` / `read`
-([ADR 0004](https://github.com/teng-lin/rookie-cookies/blob/main/docs/adr/0004-read-is-the-recommended-entry.md)).
+The recommended entry is `read`, then `send_view` for anything you intend
+to send
+([ADR 0004](https://github.com/teng-lin/rookie-cookies/blob/main/docs/adr/0004-read-is-the-recommended-entry.md),
+[ADR 0006](https://github.com/teng-lin/rookie-cookies/blob/main/docs/adr/0006-isolation-safe-send-selection-and-explicit-isolation-loss.md)).
 Package metadata and `version()` identify the installed build.
 
 CPython **≥ 3.11**. Wheels are `cp311-abi3` (tested 3.11–3.14). CPython 3.8–3.10
@@ -27,20 +29,37 @@ pip install rookie-cookies
 import rookie_cookies as cookies
 
 # Gecko session import — profile selection and session policy are independent
-session_jar = cookies.jar(
+snapshot = cookies.read(
     browser="firefox", profile="default-release", include_session=True
 )
 
-# Domain-intact records (storage_state / allowlists)
-rows = cookies.read(browser="chrome", profile="Work").as_list()
-header = cookies.read(browser="chrome", profile="Default").header(
-    "https://example.com/"
+# A browsing context in; the cookies it selects, the header they render to,
+# and a count of what was left out and why.
+view = snapshot.send_view(
+    "https://app.example.com/",
+    top_level_site="https://example.com",
 )
+print(view["header"], view["omitted"]["partition"])
+
+# Isolation-intact records (storage_state / allowlists / auditing)
+rows = cookies.read(browser="chrome", profile="Work").detailed_cookies()
 ```
 
-`jar` is `read(...).as_jar()`. `read` never URL-filters; `http.cookiejar` owns
-send-match. There is **no** module-level `header()` — call
-`ReadResult.header(...)` on a snapshot you already took.
+`read` never URL-filters. `ReadResult.send_view` is where isolation-aware
+send-match happens, and `ReadResult.header` renders that same selection as a
+`Cookie` request-header string (see [ADR
+0006](https://github.com/teng-lin/rookie-cookies/blob/main/docs/adr/0006-isolation-safe-send-selection-and-explicit-isolation-loss.md)).
+There is **no** module-level `header()` or `send_view()` — call them on a
+snapshot you already took.
+
+`jar` is `read(...).as_jar()`, the *compatibility* projection rather than the
+send path: `http.cookiejar` cannot own send-match for a Chromium CHIPS
+partition or a Firefox container cookie, because no field its send-match
+consults can carry that identity through. So `jar` / `as_jar` **fail closed**:
+an isolated snapshot raises `isolation_loss_refused` rather than flattening
+scoped credentials into unscoped ones. Pass `allow_isolation_loss=True` to
+accept the loss — the output is then byte-for-byte what 0.6 returned.
+Unisolated snapshots are unaffected.
 
 - No-profile `read(browser="chrome")` matches `chrome()` (persistent /
   legacy-eligible cookies).
@@ -56,11 +75,11 @@ send-match. There is **no** module-level `header()` — call
 Named helpers (`chrome()`, `firefox()`, `load()`) still work. They are the
 compatibility bridge from
 [`thewh1teagle/rookie`](https://github.com/thewh1teagle/rookie) and will break
-in a later major version. Prefer `read` / `jar` for new code.
+in a later major version. Prefer `read` plus `send_view` for new code.
 
 ## Isolation-aware cookies
 
-`ReadResult.as_list()` / `.cookies()` return the frozen eight-field
+`ReadResult.as_list()` returns the frozen eight-field
 compatibility projection, which cannot represent a Chromium CHIPS partition
 key or a Firefox Multi-Account Containers identity. `detailed_cookies()`
 returns the native, isolation-intact records instead:
@@ -80,10 +99,15 @@ optional, since browser schemas vary and a missing field means the source
 never exposed it (not that the cookie has some default value).
 
 Snapshot warnings (`ReadResult.warnings`, each `{"code": ..., "count": ...}`)
-include two isolation-related codes: `malformed_host_identity` (a row whose
+include three isolation-related codes: `malformed_host_identity` (a row whose
 host did not survive decode was omitted from the snapshot, not emitted as
-`domain: ""`) and `unparsable_partition_key` (retained in the snapshot, but
-never matched by `header()` since its partition can't be identified).
+`domain: ""`), `unparsable_partition_key` (retained in the snapshot, but never
+selected by `send_view()` / `header()` since its partition can't be
+identified), and `unknown_ancestor_chain` (a partitioned Chromium row whose
+`has_cross_site_ancestor` bit the store did not record; retained, never
+selected). Warning text reads `N rows affected (code)` — deliberately not
+"skipped", since the last two count rows the snapshot keeps. Branch on `code`;
+the text is diagnostic only.
 
 ## Sending cookies (`header`)
 
@@ -120,6 +144,104 @@ unpartitioned/default-container cookies: omitting one raises
 `RookieRequestError` with `code == "incomplete_send_context"` and a
 `required` attribute naming exactly which selectors (e.g.
 `["top_level_site"]`) were missing.
+
+### Isolation selectors (0.7)
+
+Four selectors describe a browsing context a top-level site alone cannot
+identify. Each is a keyword argument of `header` / `send_view`, and equally a
+key of the mapping form:
+
+| Selector | Type | What it names |
+| --- | --- | --- |
+| `ancestor_chain` | `"same_site"` \| `"cross_site"` | Whether the request's frame tree contains a cross-site ancestor. Defaults to derived — same-site when the request site is within `top_level_site`, cross-site otherwise. Set it to describe an `A → B → A` embed, which the derived rule cannot see. |
+| `first_party_domain` | `str` | Firefox `firstPartyDomain` origin attribute |
+| `gecko_view_session_context_id` | `str` | Firefox `geckoViewSessionContextId` origin attribute |
+| `origin_attributes` | `str` | The exact raw Firefox origin-attribute suffix, e.g. `"^userContextId=2"` |
+
+`origin_attributes` is the only way to reach a row carrying an attribute this
+build does not recognize — a future Firefox field, say. It is *necessary but
+not sufficient*: such a row still passes through the partition gate and the
+typed selectors, so naming a suffix says which context a row is in, never that
+it may be sent from some other one.
+
+```python
+# An A → B → A embed: the request's own site is the top-level site, but a
+# cross-site frame sits between them.
+nested = snapshot.header(
+    "https://example.com/",
+    top_level_site="https://example.com",
+    ancestor_chain="cross_site",
+)
+```
+
+## Explaining a selection (`send_view`)
+
+`header` renders a string, which is all you need to make one request and not
+enough to explain anything. `ReadResult.send_view(...)` takes exactly
+`header`'s arguments and returns the same selection before it is flattened:
+
+```python
+view = snapshot.send_view(
+    "https://example.com/",
+    top_level_site="https://example.com",
+)
+print(view["header"])
+for record in view["cookies"]:
+    print(record["cookie"]["name"], record["context"]["partition_key"])
+print(view["omitted"]["partition"], view["omitted"]["origin"])
+```
+
+- `view["cookies"]` — the selected records in header order (longest path
+  first, then by name), each the isolation-intact
+  `{"cookie": ..., "context": ...}` shape `detailed_cookies()` returns.
+- `view["header"]` — those same records rendered; byte-identical to
+  `header(...)` for the same context, because both delegate to one core
+  selection rather than matching twice.
+- `view["omitted"]` — a count per reason: `expired`, `not_applicable`,
+  `same_site`, `partition`, `ancestor_chain_unknown`,
+  `unparsable_partition_key`, `origin`. Every key is always present, zero
+  included, so indexing one needs no guard. A row is counted exactly once,
+  under the first reason it failed.
+
+An empty `view["cookies"]` is a legitimate answer, not an error. `omitted` is
+how you tell "this context has no cookies" apart from "everything was
+excluded, and here is what excluded it".
+
+## Compatibility projections and isolation loss
+
+The eight-field cookie dict, a `CookieJar`, and a Netscape file have no cell
+for a CHIPS partition key, a Firefox `partitionKey` tuple, or container
+identity. Producing one from an isolated snapshot converts context-scoped
+credentials into unscoped ones — silently, since the result looks correct. So
+the names that promise send-safety refuse:
+
+```python
+snapshot = cookies.read(browser="chrome")
+
+try:
+    jar = snapshot.as_jar()
+except cookies.RookieRequestError as error:
+    if error.code == "isolation_loss_refused":
+        # error.required names the selectors send_view() would need instead.
+        view = snapshot.send_view("https://example.com/", top_level_site="https://example.com")
+    else:
+        raise
+
+# Or accept the loss explicitly, once you have decided it is acceptable:
+flat = snapshot.compatibility_cookies(allow_isolation_loss=True)
+jar = snapshot.as_jar(allow_isolation_loss=True)
+```
+
+| Name | Tier | Isolated snapshot |
+| --- | --- | --- |
+| `as_list()` | Inventory | Succeeds. Raw rows for display or auditing, collisions included — it never promised send-safety. |
+| `compatibility_cookies()` | Send-safe | Raises `isolation_loss_refused`; same rows and bytes as `as_list()` when it succeeds |
+| `as_jar()` / `jar(...)` | Send-safe | Raises `isolation_loss_refused` |
+| `to_cookiejar()` / `to_netscape()` | Pure functions | No policy of their own — feed them `compatibility_cookies()` |
+
+`allow_isolation_loss=True` changes *whether* the projection is produced, never
+what it contains: the output is byte-for-byte what these returned before the
+refusal existed.
 
 ## Selecting profiles (`select`)
 
@@ -329,9 +451,15 @@ Current `stop_reason` values are `timed_out`, `cancelled`, and
 attribute as an open string for forward compatibility.
 Ambiguous profile errors also carry opaque `profile_ids`; direct-path errors
 carry `source_kind`, `target_os`, and a `path_redacted` flag; an incomplete
-`header()` context (`code == "incomplete_send_context"`) carries a `required`
-list naming the missing selectors, e.g. `["top_level_site"]` — empty on every
-other error. Human-readable exception text remains diagnostic only.
+`header()` / `send_view()` context (`code == "incomplete_send_context"`) and a
+refused jar projection (`code == "isolation_loss_refused"`) both carry a
+`required` list naming selectors, e.g. `["top_level_site"]` — empty on every
+other error. The two codes draw on **one** vocabulary, so code that already
+branches on one's `required` needs no second one: for
+`incomplete_send_context` it is the selectors the call did not receive, and
+for `isolation_loss_refused` it is the selectors a `send_view()` / `header()`
+call would need for that snapshot instead. Human-readable exception text
+remains diagnostic only.
 
 ## Netscape
 
@@ -362,17 +490,42 @@ path_cookies = rookie_cookies.firefox_based("/path/to/cookies.sqlite")
 
 Wheels were `cp38-abi3` until the 0.6 break.
 
+## Migrating to 0.7
+
+Nothing is renamed. `jar`, `as_jar`, `header`, `as_list`,
+`detailed_cookies`, and every named helper keep their names and their
+meanings, and every 0.6 call still type-checks — the opt-in is a defaulted
+keyword-only argument. Three things change:
+
+| Change | What breaks | What to do |
+| --- | --- | --- |
+| `jar` / `as_jar` fail closed on isolation loss | Only a call against a snapshot that holds a partitioned or containered cookie. It now raises `RookieRequestError` with `code == "isolation_loss_refused"` instead of silently flattening. Unisolated snapshots are unaffected. | Move to `send_view()` / `header()` if you were going to *send* those cookies, or pass `allow_isolation_loss=True` if you were not. |
+| `header()` matches on full partition identity | A `header()` call that previously merged two contexts' cookies now splits them, and a row carrying an origin attribute this build does not recognize is omitted until you name it with `origin_attributes`. | Supply the selectors the error's `required` list names. Use `send_view()`'s `omitted` counts to see what a context excluded and why. |
+| Same-site includes subdomains | A `SameSite=Lax`/`Strict` row is now selected for a request host that is a subdomain of `top_level_site`'s host, where 0.6 required literal host equality. The rule only widens — nothing that was sent before is withheld now. | Nothing, unless you were relying on literal host equality. Sibling subdomains stay cross-site, and an IP literal on either side still needs an exact match. |
+
+1. Wherever you called `jar(...)` / `as_jar()` in order to send cookies,
+   call `send_view(url, top_level_site=...)` instead and use its `"header"`.
+2. Wherever you called them to *export* cookies (a Netscape file, a
+   `storage_state`, an audit listing), decide explicitly: pass
+   `allow_isolation_loss=True`, or switch to `detailed_cookies()` and keep
+   the isolation identity.
+3. Catch `isolation_loss_refused` alongside `incomplete_send_context` — they
+   share the `required` vocabulary, so one handler covers both.
+4. Prefer `send_view()` over `header()` when you need to explain an empty or
+   surprising result; `header()` alone cannot tell "no cookies here" from
+   "everything was excluded".
+
 ## Migrate 0.5.6 → 0.6.0
 
 | Area | 0.5.6 / early 0.5.x | 0.6.0 |
 | --- | --- | --- |
-| Recommended entry | `chrome()` / `to_cookiejar(...)` | `jar(browser=..., profile=...)` or `read(...).as_list()` |
+| Recommended entry | `chrome()` / `to_cookiejar(...)` | `read(browser=..., profile=...)`, then `send_view(...)` to send or `as_list()` to inspect |
 | Gecko session cookies | Not a first-class policy | Pass `include_session=True` to `read` / `jar`; `profile=` is optional and only selects which profile |
 | CPython | 3.8-era / `cp38-abi3` | **≥ 3.11**, `cp311-abi3` |
 | Path APIs | `firefox_based`, `chromium_based`, `any_browser` | `extract_from_path` (`cookies_from_path` / `chromium_cookies_from_path` are deprecated aliases onto it, kept until ≥ 0.7) |
 | Path request faults | Flat `RuntimeError` | `RookieRequestError` (`ValueError` subclass) |
 | Header view | Manual / `to_cookiejar` | `ReadResult.header(url)` or `header(context, ...)` — **no** module-level `header()` |
-| Isolation (CHIPS / containers) | Not in 0.5.6 | `ReadResult.detailed_cookies()` |
+| Isolation (CHIPS / containers) | Not in 0.5.6 | `ReadResult.detailed_cookies()`; from 0.7, `ReadResult.send_view(...)` for the send-side view |
 | Reports | Not in 0.5.6 | `report(...)` / `browser_report(...)`, `profiles(...)` |
 | Windows App-Bound (v20) | Always `allow_elevated_fallback` (named helpers only) | `app_bound="injection_only"` by default on jobs; pass `"disabled"` to opt out or `"allow_elevated_fallback"` to permit SYSTEM fallback |
 

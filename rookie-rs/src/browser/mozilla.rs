@@ -135,21 +135,19 @@ pub(crate) fn firefox_cookie_context(origin_attributes: Option<String>) -> Cooki
     origin_attributes,
     ..CookieContext::default()
   };
-  let Some(attributes) = context.origin_attributes.as_deref() else {
-    return context;
-  };
-  for (name, value) in url::form_urlencoded::parse(
-    attributes
-      .strip_prefix('^')
-      .unwrap_or(attributes)
-      .as_bytes(),
-  ) {
-    match name.as_ref() {
-      "userContextId" => context.user_context_id = value.parse().ok(),
-      "partitionKey" => context.partition_key = Some(value.into_owned()),
-      "privateBrowsingId" => context.private_browsing_id = value.parse().ok(),
-      _ => {}
-    }
+  // The full parse recognizes five attribute names; `CookieContext` has a
+  // field for three of them. The other two, and the fact that an unrecognized
+  // name was present at all, are selection-time state that
+  // `crate::isolation::StoredIsolation` recomputes -- deliberately not new
+  // public fields on the snapshot type.
+  let parsed = context
+    .origin_attributes
+    .as_deref()
+    .map(crate::isolation::parse_firefox_origin_attributes);
+  if let Some(parsed) = parsed {
+    context.user_context_id = parsed.user_context_id;
+    context.partition_key = parsed.partition_key;
+    context.private_browsing_id = parsed.private_browsing_id;
   }
   context
 }

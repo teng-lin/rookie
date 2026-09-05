@@ -38,7 +38,7 @@
     "prepack": "node scripts/patch-loader.js",
     "test": "ava",
     "test:worker-panic": "ava __test__/worker-panic.test-support.mjs",
-    "typecheck": "tsc --noEmit --strict index.d.ts",
+    "typecheck": "tsc --noEmit --strict --target es2022 --moduleResolution node index.d.ts __test__/typing/consumer.ts",
     "universal": "napi universalize",
     "version": "napi version"
   },

@@ -78,6 +78,7 @@ export function verifyCookieRecords(
   projection,
   records,
   surface,
+  sendView = null,
 ) {
   const completed = spawnSync(
     pythonExecutable(),
@@ -89,6 +90,9 @@ export function verifyCookieRecords(
       projection,
       "--surface",
       surface,
+      // A named send view narrows the expected side to what one request
+      // context should select, still through the same exact-set comparison.
+      ...(sendView === null ? [] : ["--send-view", sendView]),
     ],
     {
       input: JSON.stringify(recordsForVerifier(projection, records)),

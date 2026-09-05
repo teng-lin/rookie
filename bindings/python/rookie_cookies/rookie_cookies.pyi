@@ -8,6 +8,10 @@ CookieList = List[Dict[str, Any]]
 AppBoundPolicy = Literal["disabled", "injection_only", "allow_elevated_fallback"]
 SingleProfileSelection = Literal["legacy_first"]
 ReportProfileSelection = Literal["legacy_first", "all"]
+# Whether the request's frame tree contains a cross-site ancestor. Omitting it
+# derives one (same-site when the request site is within top_level_site);
+# setting it describes a nested A -> B -> A chain the derived rule cannot see.
+AncestorChain = Literal["same_site", "cross_site"]
 
 class CookieObject(TypedDict):
     domain: str
@@ -35,7 +39,8 @@ class DetailedCookie(TypedDict):
     context: CookieContext
 
 class SendContextMapping(TypedDict, total=False):
-    """Mapping form of ``ReadResult.header``'s positional ``context`` argument."""
+    """Mapping form of ``ReadResult.header`` / ``send_view``'s positional
+    ``context`` argument. Both methods accept the same keys."""
 
     url: str
     top_level_site: str
@@ -44,6 +49,39 @@ class SendContextMapping(TypedDict, total=False):
     user_context_id: int
     private_browsing_id: int
     now: float
+    ancestor_chain: AncestorChain
+    first_party_domain: str
+    gecko_view_session_context_id: str
+    # The exact raw Firefox origin-attribute suffix, e.g. "^userContextId=2".
+    # The only way to select a row carrying an attribute this build does not
+    # recognize; necessary but not sufficient, since the dimensions it does
+    # recognize still have to match.
+    origin_attributes: str
+
+class SendOmissions(TypedDict):
+    """Rows a send view left out, counted by the first reason each failed.
+
+    Every key is always present, zero included, so the shape is fixed across
+    releases. A row is counted exactly once.
+    """
+
+    expired: int
+    not_applicable: int
+    same_site: int
+    partition: int
+    ancestor_chain_unknown: int
+    unparsable_partition_key: int
+    origin: int
+
+class SendView(TypedDict):
+    """What one send context selects, and what it left behind."""
+
+    # The selected records in header order: longest path first, then by name.
+    cookies: DetailedCookieList
+    # Those same records rendered as a Cookie request-header value --
+    # byte-identical to ReadResult.header(...) for the same context.
+    header: str
+    omitted: SendOmissions
 
 class ChromiumPathOptions(TypedDict, total=False):
     domains: list[str]
@@ -83,9 +121,12 @@ class RookieError(Exception):
     source_kind: str | None
     target_os: str | None
     path_redacted: bool
-    # The SendContext selectors header() needed but did not receive (e.g.
-    # ["top_level_site"]). Empty for every kind except "request" with
-    # code "incomplete_send_context".
+    # The SendContext selectors the call needed but did not receive (e.g.
+    # ["top_level_site"]). Empty for every kind except "request" with code
+    # "incomplete_send_context" (the ones header()/send_view() were not given)
+    # or "isolation_loss_refused" (the ones a send_view()/header() call would
+    # need for this snapshot, instead of the jar projection that refused).
+    # One vocabulary, so code branching on `required` needs no second one.
     required: list[str]
 
 class RookieRequestError(RookieError, ValueError):
@@ -623,8 +664,35 @@ class ReadResult:
     def as_list(self) -> CookieList:
         """Eight-key cookie dicts matching ``chrome()`` / ``load()``."""
         ...
-    def as_jar(self) -> "http.cookiejar.CookieJar":
-        """Load every acquired record into ``http.cookiejar``. Not send-filtered."""
+    def as_jar(
+        self, *, allow_isolation_loss: bool = False
+    ) -> "http.cookiejar.CookieJar":
+        """
+        Load every acquired record into ``http.cookiejar``. Not send-filtered.
+
+        Fails closed: a ``CookieJar`` has no field for a CHIPS partition key,
+        a Firefox ``partitionKey`` tuple, or container identity, so a snapshot
+        holding any isolated cookie raises ``RookieRequestError`` with
+        ``code == "isolation_loss_refused"`` and a ``required`` list naming
+        the selectors ``send_view()`` / ``header()`` would need, rather than
+        silently producing unscoped credentials. Pass
+        ``allow_isolation_loss=True`` to accept the loss; the output is then
+        exactly what this returned before the refusal existed.
+        """
+        ...
+    def compatibility_cookies(
+        self, *, allow_isolation_loss: bool = False
+    ) -> CookieList:
+        """
+        ``as_list()``'s eight-key rows, refusing to silently drop isolation.
+
+        The same rows and the same bytes as ``as_list()`` whenever it
+        succeeds; the difference is that this raises
+        ``isolation_loss_refused`` instead of flattening an isolated
+        snapshot into a projection that cannot represent it. ``as_list()``
+        stays the infallible *inventory* projection, for looking at raw rows
+        rather than sending them.
+        """
         ...
     def detailed_cookies(self) -> DetailedCookieList:
         """
@@ -646,9 +714,17 @@ class ReadResult:
         user_context_id: Optional[int] = None,
         private_browsing_id: Optional[int] = None,
         now: Optional[float] = None,
+        ancestor_chain: Optional[AncestorChain] = None,
+        first_party_domain: Optional[str] = None,
+        gecko_view_session_context_id: Optional[str] = None,
+        origin_attributes: Optional[str] = None,
     ) -> str:
         """
         Cookie request-header view over this snapshot.
+
+        Exactly ``send_view(...)["header"]``: both delegate to the same core
+        selection, so the two cannot disagree about which rows a context
+        selects.
 
         ``context`` is positional-only and accepts either a plain URL string
         (equivalent to ``url=...`` -- every other field defaults) or a mapping
@@ -666,12 +742,56 @@ class ReadResult:
         :param user_context_id: Firefox Multi-Account Containers identity
         :param private_browsing_id: Firefox private-browsing identity
         :param now: Epoch seconds overriding the send-time clock (default: now)
+        :param ancestor_chain: ``"same_site"`` or ``"cross_site"``. Defaults to
+            derived: same-site when the request site is within
+            ``top_level_site``, cross-site otherwise. Set it to describe an
+            ``A -> B -> A`` chain the derived rule cannot see.
+        :param first_party_domain: Firefox ``firstPartyDomain`` origin attribute
+        :param gecko_view_session_context_id: Firefox
+            ``geckoViewSessionContextId`` origin attribute
+        :param origin_attributes: The exact raw Firefox origin-attribute suffix
+            (e.g. ``"^userContextId=2"``) -- the only way to select a row
+            carrying an attribute this build does not recognize
         :raises RookieRequestError: An invalid/missing URL or top-level site
             (``invalid_url`` / ``invalid_top_level_site``), an unrepresentable
-            clock (``clock_unrepresentable``), or a snapshot that positively
-            observes an isolated value ``context`` did not select
-            (``incomplete_send_context`` -- see the ``required`` attribute for
-            which selectors were missing)
+            clock (``clock_unrepresentable``), an unknown ``ancestor_chain``
+            value, or a snapshot that positively observes an isolated value
+            ``context`` did not select (``incomplete_send_context`` -- see the
+            ``required`` attribute for which selectors were missing)
+        """
+        ...
+    def send_view(
+        self,
+        context: "str | SendContextMapping | None" = None,
+        /,
+        *,
+        url: Optional[str] = None,
+        top_level_site: Optional[str] = None,
+        resource: Optional[Literal["navigation", "subresource"]] = None,
+        method: Optional[Literal["safe", "unsafe"]] = None,
+        user_context_id: Optional[int] = None,
+        private_browsing_id: Optional[int] = None,
+        now: Optional[float] = None,
+        ancestor_chain: Optional[AncestorChain] = None,
+        first_party_domain: Optional[str] = None,
+        gecko_view_session_context_id: Optional[str] = None,
+        origin_attributes: Optional[str] = None,
+    ) -> SendView:
+        """
+        The cookies one send context selects, plus what was left out and why.
+
+        Takes exactly ``header``'s arguments and returns the same selection
+        before it is flattened into a string: ``"cookies"`` (the selected
+        isolation-intact records, in header order), ``"header"`` (those
+        records rendered, byte-identical to ``header(...)``), and
+        ``"omitted"`` (a count per reason, every reason present with a zero
+        when nothing failed for it).
+
+        An empty ``"cookies"`` is a legitimate answer, not an error;
+        ``"omitted"`` is how a caller tells "this context has no cookies"
+        apart from "everything was excluded, and here is what excluded it".
+
+        :raises RookieRequestError: The same failures ``header`` raises
         """
         ...
     def __iter__(self): ...
@@ -770,9 +890,17 @@ def jar(
     timeout: Optional[float] = None,
     cancellation: Optional[CancellationHandle] = None,
     app_bound: AppBoundPolicy = "injection_only",
+    allow_isolation_loss: bool = False,
 ) -> "http.cookiejar.CookieJar":
     """
     Sugar: ``read(...).as_jar()``. Warnings are discarded.
+
+    **Fails closed on isolation loss (0.7).** A snapshot holding any isolated
+    cookie raises ``RookieRequestError`` with
+    ``code == "isolation_loss_refused"``; its ``required`` list names the
+    selectors ``ReadResult.send_view()`` / ``header()`` would need. Pass
+    ``allow_isolation_loss=True`` to accept the flattening. Unisolated
+    snapshots are unaffected.
 
     **Migration trap:** ``include_session`` defaults to ``False``. In
     0.6-beta, ``jar(profile="Default")`` imported that profile's session

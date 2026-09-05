@@ -250,6 +250,68 @@ def validate_manifest(manifest: Any) -> None:
                     )
 
 
+def send_view_entry(manifest: Mapping[str, Any], name: str) -> Mapping[str, Any]:
+    """Return one expected send view from a manifest that carries them.
+
+    A send view is the manifest's answer to "what does *this* request select",
+    derived from the browser's own raw rows rather than from the library the
+    surfaces are testing.
+    """
+
+    views = manifest.get("expected_send_views")
+    if not isinstance(views, list):
+        raise ManifestError("manifest carries no expected_send_views array")
+    matches = [
+        view
+        for view in views
+        if isinstance(view, Mapping) and view.get("name") == name
+    ]
+    if len(matches) != 1:
+        raise ManifestError(
+            f"expected exactly one send view named {name!r}, got {len(matches)}"
+        )
+    entry = matches[0]
+    shape: tuple[tuple[str, type | tuple[type, ...]], ...] = (
+        ("context", Mapping),
+        ("expected", list),
+        ("header_tokens", list),
+        ("expected_omitted_min", Mapping),
+    )
+    for field, kind in shape:
+        if not isinstance(entry.get(field), kind):
+            raise ManifestError(
+                f"send view {name!r} lacks a well-formed {field!r} field"
+            )
+    return entry
+
+
+def send_view_names(manifest: Mapping[str, Any]) -> list[str]:
+    """Every expected send view's name, in manifest order."""
+
+    views = manifest.get("expected_send_views")
+    if not isinstance(views, list):
+        raise ManifestError("manifest carries no expected_send_views array")
+    return [str(view["name"]) for view in views]
+
+
+def send_view_manifest(manifest: Mapping[str, Any], name: str) -> dict[str, Any]:
+    """Project one expected send view into a manifest ``verify_records`` reads.
+
+    Reusing the exact-set verifier rather than writing a second comparison is
+    the point: a selected set is held to the same identity fields, the same
+    duplicate check, and the same failure messages as a full snapshot.
+    """
+
+    entry = send_view_entry(manifest, name)
+    projected = dict(manifest)
+    projected["expected"] = {
+        "filtered_flat": [],
+        "unfiltered_flat": [],
+        "detailed": list(entry["expected"]),
+    }
+    return projected
+
+
 def verify_records(
     manifest: Mapping[str, Any],
     projection: str,

@@ -15,6 +15,7 @@ from typing import Any, Sequence
 from urllib.parse import parse_qsl, urlparse
 from urllib.request import HTTPSHandler, build_opener
 
+from assert_partitioned_context import schemeful_site
 from browser_coverage_contract import emit_representative_depth
 from cookie_manifest import paths_refer_to_same_file
 from run_active_writer_e2e import (
@@ -38,6 +39,60 @@ MARKER = {
     "kind": "rookie-cookie-fixture-source",
     "source_kind": "disposable_e2e_profile",
 }
+
+# Every host the lane resolves to the disposable HTTPS origin. nested shares a
+# registrable site with top, which is the only reason an A -> B -> A ancestor
+# chain is expressible without a second certificate or a public-suffix rule.
+TEST_HOSTS = (
+    "top.rookie-a.test",
+    "other.rookie-c.test",
+    "third.rookie-b.test",
+    "nested.rookie-a.test",
+)
+INVENTORY_PATH = Path(__file__).with_name("partition_context_inventory.json")
+# Firefox omits a default-valued origin attribute, so a name outside this set
+# (or a known name whose value will not parse) is a row this build cannot
+# decompose, and it demands the raw `origin_attributes` selector.
+KNOWN_FIREFOX_ATTRIBUTES = frozenset(
+    {
+        "userContextId",
+        "privateBrowsingId",
+        "partitionKey",
+        "firstPartyDomain",
+        "geckoViewSessionContextId",
+    }
+)
+# ADR 0006 Decision 5: appended, never reordered.
+SELECTOR_TOKEN_ORDER = (
+    "top_level_site",
+    "user_context_id",
+    "private_browsing_id",
+    "first_party_domain",
+    "gecko_view_session_context_id",
+    "origin_attributes",
+)
+DEFAULT_PORTS = {"https": 443, "http": 80}
+
+
+def row_inventory(engine: str) -> dict[str, Any]:
+    """Return the one expected-row table every partition-context actor reads."""
+
+    inventory = json.loads(INVENTORY_PATH.read_text(encoding="utf-8"))
+    if inventory.get("schema_version") != 1:
+        raise ActiveWriterError(
+            f"unsupported partition inventory schema {inventory.get('schema_version')!r}"
+        )
+    try:
+        entry = inventory["engines"][engine]
+    except KeyError as error:
+        raise ActiveWriterError(
+            f"partition_context_inventory.json has no {engine} entry"
+        ) from error
+    if sum(entry["raw_rows_by_name"].values()) != entry["raw_row_total"]:
+        raise ActiveWriterError(
+            f"{engine} inventory total disagrees with its per-name counts: {entry!r}"
+        )
+    return entry
 
 
 def require_remote_sandbox(path: Path) -> Path:
@@ -129,7 +184,7 @@ def generate_certificate(sandbox: Path) -> tuple[Path, Path]:
             "-subj",
             "/CN=rookie-context-e2e",
             "-addext",
-            "subjectAltName=DNS:top.rookie-a.test,DNS:other.rookie-c.test,DNS:third.rookie-b.test",
+            "subjectAltName=" + ",".join(f"DNS:{host}" for host in TEST_HOSTS),
             "-keyout",
             str(private_key),
             "-out",
@@ -229,7 +284,361 @@ def _unsigned(attributes: dict[str, str], name: str) -> int | None:
     return int(value) if value is not None and value.isdigit() else None
 
 
-def write_raw_context_manifest(database: Path, engine: str, output: Path) -> None:
+def _explicit_port(url: str) -> int | None:
+    """Return a URL's port, or None when it is the scheme's default.
+
+    ADR 0006 derives the Firefox partition port from the top-level URL rather
+    than from a selector of its own, and a scheme-default port is not written
+    into either engine's stored key, so "absent" and "default" have to compare
+    equal here too.
+    """
+
+    parsed = urlparse(url)
+    port = parsed.port
+    if port is None or port == DEFAULT_PORTS.get(parsed.scheme):
+        return None
+    return port
+
+
+def _host_within(request_host: str, site_host: str) -> bool:
+    """Site membership: equal hosts, or a subdomain of the top-level site.
+
+    No public-suffix list, matching ADR 0006 Decision 4. This lane only ever
+    passes controlled `.test` hosts, so the registrable-site question the
+    decision documents as the caller's job cannot arise.
+    """
+
+    return request_host == site_host or request_host.endswith(f".{site_host}")
+
+
+def _resolve_chain(send_context: dict[str, Any]) -> tuple[bool, str]:
+    """Return `(sites_match, resolved_ancestor_chain)` for a send context.
+
+    The resolved chain is `cross_site` whenever the request and top-level
+    sites differ, regardless of any explicit selector; otherwise it is the
+    explicit selector, defaulting to `same_site`.
+    """
+
+    request = urlparse(send_context["url"])
+    site = urlparse(send_context["top_level_site"])
+    sites_match = request.scheme == site.scheme and _host_within(
+        request.hostname or "", site.hostname or ""
+    )
+    if not sites_match:
+        return False, "cross_site"
+    return True, send_context.get("ancestor_chain", "same_site")
+
+
+def _parse_firefox_partition_tuple(
+    key: str,
+) -> tuple[str, str, int | None, bool] | None:
+    """Parse `(scheme,host[,port][,f])`; None for anything else."""
+
+    if not key.startswith("(") or not key.endswith(")"):
+        return None
+    fields = key[1:-1].split(",")
+    if not 2 <= len(fields) <= 4 or not fields[0] or not fields[1]:
+        return None
+    scheme, host = fields[0], fields[1]
+    rest = fields[2:]
+    foreign = bool(rest) and rest[-1] == "f"
+    if foreign:
+        rest = rest[:-1]
+    port: int | None = None
+    if rest:
+        if len(rest) != 1 or not rest[0].isdigit():
+            return None
+        port = int(rest[0])
+    return scheme, host, port, foreign
+
+
+def _chromium_isolation_reason(
+    fields: dict[str, Any], send_context: dict[str, Any], resolved: str
+) -> str | None:
+    top_key = fields["top_frame_site_key"]
+    if top_key in (None, ""):
+        return None
+    bit = fields["has_cross_site_ancestor"]
+    if bit is None:
+        return "ancestor_chain_unknown"
+    key = urlparse(str(top_key))
+    site = urlparse(send_context["top_level_site"])
+    if (key.scheme, key.hostname) != (site.scheme, site.hostname):
+        return "partition"
+    if _explicit_port(str(top_key)) != _explicit_port(send_context["top_level_site"]):
+        return "partition"
+    if bool(bit) != (resolved == "cross_site"):
+        return "partition"
+    return None
+
+
+def _firefox_isolation_reason(
+    fields: dict[str, Any],
+    send_context: dict[str, Any],
+    *,
+    sites_match: bool,
+    resolved: str,
+    same_site_context: bool,
+) -> str | None:
+    key = fields["partition_key"]
+    if key in (None, ""):
+        return None
+    parsed = _parse_firefox_partition_tuple(str(key))
+    if parsed is None:
+        # An unreadable key makes the row opaque, and `RequestIsolation::verdict`
+        # answers that before any field-by-field gate: there is nothing to
+        # compare, so the first-party guard below never gets a say. Ordering
+        # this the other way would attribute the row to `partition` and
+        # disagree with the core over a row both agree to withhold.
+        return "unparsable_partition_key"
+    if same_site_context:
+        # A partition is by construction not the unpartitioned default
+        # context, so a first-party request never reaches into one.
+        return "partition"
+    scheme, host, port, foreign = parsed
+    site = urlparse(send_context["top_level_site"])
+    if (scheme, host) != (site.scheme, site.hostname):
+        return "partition"
+    if port != _explicit_port(send_context["top_level_site"]):
+        return "partition"
+    if foreign != (sites_match and resolved == "cross_site"):
+        return "partition"
+    return None
+
+
+def _omission_reason(
+    record: dict[str, Any], send_context: dict[str, Any], engine: str
+) -> str | None:
+    """The first reason a raw row is not sent, or None when it is selected.
+
+    This is the independent half of the lane: it reads the browser's own
+    SQLite rows and applies ADR 0006's rules directly, so the expected send
+    set never borrows the library's answer to the question being asked.
+    Attribution follows the ADR's evaluation order -- expiry, then the
+    domain/path/Secure filter, then isolation, then SameSite -- and every row
+    in this corpus is unexpired, so the expiry stage never fires.
+    """
+
+    cookie = record["cookie"]
+    fields = record["context"]
+    if send_context.get("origin_attributes") is not None:
+        # The raw suffix selector governs opaque rows, which this oracle does
+        # not model. No lane context supplies one; a future one that does must
+        # teach the oracle first rather than get a quietly wrong expectation.
+        raise ActiveWriterError(
+            "the send-view oracle does not model the raw origin_attributes selector"
+        )
+    request = urlparse(send_context["url"])
+    if cookie["domain"].removeprefix(".") != request.hostname:
+        return "not_applicable"
+    if not (request.path or "/").startswith(cookie["path"]):
+        return "not_applicable"
+    if cookie["secure"] and request.scheme != "https":
+        return "not_applicable"
+    sites_match, resolved = _resolve_chain(send_context)
+    same_site_context = sites_match and resolved == "same_site"
+    if engine == "chromium":
+        isolation = _chromium_isolation_reason(fields, send_context, resolved)
+    else:
+        isolation = _firefox_isolation_reason(
+            fields,
+            send_context,
+            sites_match=sites_match,
+            resolved=resolved,
+            same_site_context=same_site_context,
+        )
+    if isolation is not None:
+        return isolation
+    # Every context this lane builds is a `subresource` request, so the
+    # cross-site top-level-navigation exemption Lax otherwise has cannot apply.
+    if cookie["same_site"] >= 1 and not same_site_context:
+        return "same_site"
+    return None
+
+
+def send_view_contexts(
+    *, top_origin: str, other_top_origin: str, third_origin: str, nested_origin: str
+) -> list[tuple[str, dict[str, Any]]]:
+    """The send contexts every public surface is held to, in manifest order.
+
+    `nested_*` are the three readings of one A-site iframe: derived (which must
+    agree with the explicit same-site selector) and the explicit cross-site
+    selector that names the A -> B -> A embed the derived rule cannot see.
+    `top_*` pair a first-party request against the same request declared
+    cross-site, which is what makes the `SameSite=Lax` omission observable.
+    """
+
+    top_site = schemeful_site(top_origin)
+    other_site = schemeful_site(other_top_origin)
+    base = {"resource": "subresource", "method": "safe"}
+    third = f"{third_origin}/echo"
+    nested = f"{nested_origin}/set-ancestor"
+    top = f"{top_origin}/chain-top"
+    return [
+        ("matching", {"url": third, "top_level_site": top_site, **base}),
+        (
+            "other_top_level_site",
+            {"url": third, "top_level_site": other_site, **base},
+        ),
+        ("nested_derived", {"url": nested, "top_level_site": top_site, **base}),
+        (
+            "nested_same_site",
+            {
+                "url": nested,
+                "top_level_site": top_site,
+                "ancestor_chain": "same_site",
+                **base,
+            },
+        ),
+        (
+            "nested_cross_site",
+            {
+                "url": nested,
+                "top_level_site": top_site,
+                "ancestor_chain": "cross_site",
+                **base,
+            },
+        ),
+        ("top_first_party", {"url": top, "top_level_site": top_site, **base}),
+        (
+            "top_cross_site",
+            {
+                "url": top,
+                "top_level_site": top_site,
+                "ancestor_chain": "cross_site",
+                **base,
+            },
+        ),
+    ]
+
+
+def _record_sort_key(record: dict[str, Any]) -> tuple[str, ...]:
+    cookie = record["cookie"]
+    return (
+        cookie["domain"],
+        cookie["path"],
+        cookie["name"],
+        json.dumps(record["context"], sort_keys=True),
+    )
+
+
+def _expected_send_views(
+    detailed: list[dict[str, Any]],
+    contexts: list[tuple[str, dict[str, Any]]],
+    engine: str,
+) -> list[dict[str, Any]]:
+    views: list[dict[str, Any]] = []
+    for name, send_context in contexts:
+        selected: list[dict[str, Any]] = []
+        omitted: dict[str, int] = {}
+        for record in detailed:
+            reason = _omission_reason(record, send_context, engine)
+            if reason is None:
+                selected.append(record)
+            else:
+                omitted[reason] = omitted.get(reason, 0) + 1
+        views.append(
+            {
+                "name": name,
+                "context": send_context,
+                "expected": sorted(selected, key=_record_sort_key),
+                "header_tokens": sorted(
+                    f"{record['cookie']['name']}={record['cookie']['value']}"
+                    for record in selected
+                ),
+                # A lower bound, not an equality: the omission counters see the
+                # whole snapshot, and a browser is free to leave a cookie of its
+                # own in a disposable profile. Every rookie_ row is accounted
+                # for here, which is what the claim is about.
+                "expected_omitted_min": dict(sorted(omitted.items())),
+            }
+        )
+    return views
+
+
+def _demanded_selectors(detailed: list[dict[str, Any]], engine: str) -> list[str]:
+    """The tokens an incomplete send context must name, in ADR 0006 order."""
+
+    demanded: set[str] = set()
+    for record in detailed:
+        fields = record["context"]
+        if fields["top_frame_site_key"] not in (None, "") or fields[
+            "partition_key"
+        ] not in (None, ""):
+            demanded.add("top_level_site")
+        if (fields["user_context_id"] or 0) > 0:
+            demanded.add("user_context_id")
+        if (fields["private_browsing_id"] or 0) > 0:
+            demanded.add("private_browsing_id")
+        raw = fields["origin_attributes"]
+        if engine != "chromium" and raw:
+            parsed = dict(parse_qsl(str(raw).removeprefix("^")))
+            if parsed.get("firstPartyDomain"):
+                demanded.add("first_party_domain")
+            if parsed.get("geckoViewSessionContextId"):
+                demanded.add("gecko_view_session_context_id")
+            if set(parsed) - KNOWN_FIREFOX_ATTRIBUTES:
+                demanded.add("origin_attributes")
+    return [token for token in SELECTOR_TOKEN_ORDER if token in demanded]
+
+
+def assert_ancestor_identities(
+    detailed: list[dict[str, Any]], engine: str, version: str
+) -> None:
+    """Require both ancestor chains to have survived as distinct stored rows.
+
+    This never skips. A browser that collapsed A -> A and A -> B -> A into one
+    row, or that recorded no foreign-ancestor marker, is a finding about that
+    browser version, and the version is named so the finding is actionable.
+    """
+
+    rows = [
+        record for record in detailed if record["cookie"]["name"] == "rookie_ancestor"
+    ]
+    values = sorted(record["cookie"]["value"] for record in rows)
+    if values != ["ancestor-cross_site", "ancestor-same_site"]:
+        raise ActiveWriterError(
+            f"{engine} {version} did not keep both ancestor chains apart; "
+            f"rookie_ancestor rows were {values}"
+        )
+    if engine == "chromium":
+        bits = sorted(
+            bool(record["context"]["has_cross_site_ancestor"]) for record in rows
+        )
+        if bits != [False, True]:
+            raise ActiveWriterError(
+                f"Chromium {version} stored has_cross_site_ancestor {bits}, expected "
+                "0 for the same-site chain and 1 for the A -> B -> A chain"
+            )
+        return
+    cross = next(
+        record for record in rows if record["cookie"]["value"] == "ancestor-cross_site"
+    )
+    key = str(cross["context"]["partition_key"] or "")
+    parsed = _parse_firefox_partition_tuple(key)
+    if parsed is None or not parsed[3]:
+        raise ActiveWriterError(
+            f"Firefox {version} wrote no foreign-by-ancestor `,f` partitionKey for "
+            f"the A -> B -> A row; it stored {key!r} (originAttributes "
+            f"{cross['context']['origin_attributes']!r}). The `,f` tuple field is "
+            "what makes an A -> B -> A embed a distinct Firefox partition, so this "
+            "lane fails rather than skipping."
+        )
+    if (parsed[0], parsed[1]) != ("https", "rookie-a.test"):
+        raise ActiveWriterError(
+            f"Firefox {version} partitioned the A -> B -> A row under {key!r}, "
+            "expected the A site"
+        )
+
+
+def write_raw_context_manifest(
+    database: Path,
+    engine: str,
+    output: Path,
+    *,
+    origins: dict[str, str],
+    browser_version: str | None = None,
+) -> None:
     """Build an exact oracle directly from the browser's raw SQLite context."""
 
     table = "cookies" if engine == "chromium" else "moz_cookies"
@@ -246,11 +655,16 @@ def write_raw_context_manifest(database: Path, engine: str, output: Path) -> Non
     finally:
         connection.close()
 
-    expected_count = 5 if engine == "chromium" else 7
-    if len(rows) != expected_count:
+    inventory = row_inventory(engine)
+    version = browser_version or "an unrecorded version"
+    if len(rows) != inventory["raw_row_total"]:
+        observed: dict[str, int] = {}
+        for row in rows:
+            observed[str(row["name"])] = observed.get(str(row["name"]), 0) + 1
         raise ActiveWriterError(
-            f"raw {engine} context store contained {len(rows)} rookie rows; "
-            f"expected {expected_count}"
+            f"raw {engine} context store ({version}) contained {len(rows)} rookie "
+            f"rows {observed}; partition_context_inventory.json expects "
+            f"{inventory['raw_row_total']} {inventory['raw_rows_by_name']}"
         )
 
     detailed: list[dict[str, Any]] = []
@@ -260,6 +674,11 @@ def write_raw_context_manifest(database: Path, engine: str, output: Path) -> Non
             top_key = str(top_key_raw) if top_key_raw not in (None, "") else None
             name = str(row["name"])
             host = str(row["host_key"])
+            ancestor_bit = (
+                row["has_cross_site_ancestor"]
+                if "has_cross_site_ancestor" in columns
+                else None
+            )
             if name == "rookie_top":
                 labels = {
                     "top.rookie-a.test": "a",
@@ -271,6 +690,30 @@ def write_raw_context_manifest(database: Path, engine: str, output: Path) -> Non
                     )
                 label = labels[host]
                 value = f"top-{label}"
+            elif name == "rookie_ancestor":
+                # The value is encrypted in the store, so it is reconstructed
+                # from the stored identity -- which makes reconstructing it an
+                # assertion that the ancestor bit is the thing separating the
+                # two otherwise identical rows.
+                if host != "nested.rookie-a.test" or top_key is None:
+                    raise ActiveWriterError(
+                        f"unexpected Chromium ancestor identity: {host!r}, {top_key!r}"
+                    )
+                if urlparse(top_key).hostname != "rookie-a.test":
+                    raise ActiveWriterError(
+                        f"ancestor rows must be partitioned under the A site, "
+                        f"got {top_key!r}"
+                    )
+                if ancestor_bit is None or int(ancestor_bit) not in (0, 1):
+                    raise ActiveWriterError(
+                        f"Chromium {version} stored no usable has_cross_site_ancestor "
+                        f"for {top_key!r}: {ancestor_bit!r}"
+                    )
+                value = (
+                    "ancestor-cross_site"
+                    if int(ancestor_bit) == 1
+                    else "ancestor-same_site"
+                )
             elif name != "rookie_chips" or host != "third.rookie-b.test":
                 raise ActiveWriterError(
                     f"unexpected Chromium context identity: {host!r}/{name!r}"
@@ -299,9 +742,7 @@ def write_raw_context_manifest(database: Path, engine: str, output: Path) -> Non
             context = {
                 "top_frame_site_key": top_key,
                 "has_cross_site_ancestor": (
-                    bool(row["has_cross_site_ancestor"])
-                    if "has_cross_site_ancestor" in columns
-                    else None
+                    bool(ancestor_bit) if ancestor_bit is not None else None
                 ),
                 "source_scheme": (
                     int(row["source_scheme"])
@@ -331,11 +772,13 @@ def write_raw_context_manifest(database: Path, engine: str, output: Path) -> Non
                 "rookie_top": {"top-a", "top-c"},
                 "rookie_chips": {"unpartitioned", "partition-a", "partition-c"},
                 "rookie_dfpi": {"dfpi-a", "dfpi-c"},
+                "rookie_ancestor": {"ancestor-same_site", "ancestor-cross_site"},
             }
             expected_hosts = {
                 "rookie_top": {"top.rookie-a.test", "other.rookie-c.test"},
                 "rookie_chips": {"third.rookie-b.test"},
                 "rookie_dfpi": {"third.rookie-b.test"},
+                "rookie_ancestor": {"nested.rookie-a.test"},
             }
             if (
                 name not in valid_values
@@ -369,14 +812,31 @@ def write_raw_context_manifest(database: Path, engine: str, output: Path) -> Non
             }
         detailed.append({"cookie": flat, "context": context})
 
-    matching = ["rookie_chips=partition-a", "rookie_chips=unpartitioned"]
-    other = ["rookie_chips=partition-c", "rookie_chips=unpartitioned"]
-    if engine == "firefox":
-        matching.append("rookie_dfpi=dfpi-a")
-        other.append("rookie_dfpi=dfpi-c")
+    assert_ancestor_identities(detailed, engine, version)
+
+    counts: dict[str, int] = {}
+    for record in detailed:
+        counts[record["cookie"]["name"]] = (
+            counts.get(record["cookie"]["name"], 0) + 1
+        )
+    if counts != inventory["raw_rows_by_name"]:
+        raise ActiveWriterError(
+            f"raw {engine} context store ({version}) held {counts}; "
+            f"partition_context_inventory.json expects {inventory['raw_rows_by_name']}"
+        )
+
+    contexts = send_view_contexts(
+        top_origin=origins["top"],
+        other_top_origin=origins["other_top"],
+        third_origin=origins["third"],
+        nested_origin=origins["nested"],
+    )
+    send_views = _expected_send_views(detailed, contexts, engine)
+    by_name = {view["name"]: view for view in send_views}
     manifest = {
         "schema_version": 1,
         "tiers": ["partition_context"],
+        "browser_version": browser_version,
         "identities": {
             "filtered_flat": ["domain", "path", "name"],
             "unfiltered_flat": ["domain", "path", "name"],
@@ -401,14 +861,35 @@ def write_raw_context_manifest(database: Path, engine: str, output: Path) -> Non
             "detailed": detailed,
         },
         "expected_headers": {
-            "matching": sorted(matching),
-            "other_top_level_site": sorted(other),
+            "matching": by_name["matching"]["header_tokens"],
+            "other_top_level_site": by_name["other_top_level_site"]["header_tokens"],
+        },
+        "expected_send_views": send_views,
+        "expected_missing_selector": {
+            "code": "incomplete_send_context",
+            "required": _demanded_selectors(detailed, engine),
         },
     }
     output.write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
+
+
+def observed_browser_version(observed: Path) -> str | None:
+    """Read the seeder's recorded browser version, for failure messages.
+
+    A browser that does not record an ancestor chain is a fact about that
+    build, so the raw-store oracle names the version in its error rather than
+    reporting an anonymous count mismatch.
+    """
+
+    try:
+        manifest = json.loads(observed.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    version = manifest.get("browser_version")
+    return str(version) if isinstance(version, str) and version else None
 
 
 def run(args: argparse.Namespace) -> None:
@@ -436,6 +917,7 @@ def run(args: argparse.Namespace) -> None:
     top_origin = f"https://top.rookie-a.test:{port}"
     other_top_origin = f"https://other.rookie-c.test:{port}"
     third_origin = f"https://third.rookie-b.test:{port}"
+    nested_origin = f"https://nested.rookie-a.test:{port}"
     observed = sandbox / f"{args.engine}-browser-observed.json"
     try:
         wait_for_https(port, server, args.timeout)
@@ -460,7 +942,18 @@ def run(args: argparse.Namespace) -> None:
 
     database = database_for(args.engine, profile)
     raw_manifest = sandbox / f"{args.engine}-raw-context-manifest.json"
-    write_raw_context_manifest(database, args.engine, raw_manifest)
+    write_raw_context_manifest(
+        database,
+        args.engine,
+        raw_manifest,
+        origins={
+            "top": top_origin,
+            "other_top": other_top_origin,
+            "third": third_origin,
+            "nested": nested_origin,
+        },
+        browser_version=observed_browser_version(observed),
+    )
     os.environ.update(
         {
             key: value
@@ -477,6 +970,7 @@ def run(args: argparse.Namespace) -> None:
             "ROOKIE_E2E_CONTEXT_TOP_ORIGIN": top_origin,
             "ROOKIE_E2E_CONTEXT_OTHER_TOP_ORIGIN": other_top_origin,
             "ROOKIE_E2E_CONTEXT_THIRD_ORIGIN": third_origin,
+            "ROOKIE_E2E_CONTEXT_NESTED_ORIGIN": nested_origin,
             "ROOKIE_E2E_CONTEXT_SOURCE_PORT": str(port),
             "ROOKIE_E2E_BROWSER_ID": browser_id,
             "ROOKIE_E2E_CONTEXT_MANIFEST": str(raw_manifest),
@@ -496,6 +990,8 @@ def run(args: argparse.Namespace) -> None:
         other_top_origin,
         "--third-origin",
         third_origin,
+        "--nested-origin",
+        nested_origin,
         "--source-port",
         str(port),
     ]
@@ -515,6 +1011,7 @@ def run(args: argparse.Namespace) -> None:
             other_top_origin,
             third_origin,
             str(port),
+            nested_origin,
         ],
         environment,
         "partition-node",
@@ -558,6 +1055,7 @@ def run(args: argparse.Namespace) -> None:
                 "database": str(database),
                 "observed_manifest": str(observed),
                 "raw_context_manifest": str(raw_manifest),
+                "nested_origin": nested_origin,
                 **schema_metadata(database, args.engine),
                 "surfaces": ["rust", "python", "node", "cli"],
             },
@@ -567,7 +1065,7 @@ def run(args: argparse.Namespace) -> None:
     )
     emit_representative_depth(
         "partition_context",
-        ("partitioned", "detailed", "discovery"),
+        ("partitioned", "detailed", "discovery", "send_selection"),
         ("rust", "python", "node", "cli"),
     )
 

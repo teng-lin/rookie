@@ -276,7 +276,8 @@ pub(crate) fn classify_error(error: rookie_core::Error) -> PyErr {
         // so this matches its field directly rather than adding one just for
         // this one binding-facing attribute.
         required: match request {
-          rookie_core::RequestError::IncompleteSendContext { required, .. } => required.clone(),
+          rookie_core::RequestError::IncompleteSendContext { required, .. }
+          | rookie_core::RequestError::IsolationLossRefused { required, .. } => required.clone(),
           _ => Vec::new(),
         },
       },

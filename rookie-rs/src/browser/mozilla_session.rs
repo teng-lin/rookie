@@ -797,36 +797,20 @@ pub fn create_cookie(json_cookie: &Value) -> Result<Cookie> {
   )
 }
 
+/// The session store holds `originAttributes` as JSON rather than as the
+/// `^name=value` suffix `moz_cookies` uses.
+///
+/// Both encodings go through the same parser, so an attribute name one lane
+/// recognizes is recognized by the other. A value that is neither a string nor
+/// an object is still retained verbatim: an encoding a future Firefox
+/// introduces reaches a caller intact, and fails closed at selection time
+/// rather than reading as the default context.
 pub(crate) fn firefox_session_cookie_context(origin_attributes: Option<&Value>) -> CookieContext {
   let Some(origin_attributes) = origin_attributes else {
     return CookieContext::default();
   };
-  if let Some(origin_attributes) = origin_attributes.as_str() {
-    return firefox_cookie_context(Some(origin_attributes.to_owned()));
-  }
-  let Some(attributes) = origin_attributes.as_object() else {
-    return CookieContext {
-      origin_attributes: Some(origin_attributes.to_string()),
-      ..CookieContext::default()
-    };
-  };
-
-  let unsigned_attribute = |name: &str| {
-    attributes.get(name).and_then(|value| {
-      value
-        .as_u64()
-        .and_then(|value| u32::try_from(value).ok())
-        .or_else(|| value.as_str().and_then(|value| value.parse().ok()))
-    })
-  };
-  CookieContext {
-    origin_attributes: Some(Value::Object(attributes.clone()).to_string()),
-    user_context_id: unsigned_attribute("userContextId"),
-    partition_key: attributes
-      .get("partitionKey")
-      .and_then(Value::as_str)
-      .map(str::to_owned),
-    private_browsing_id: unsigned_attribute("privateBrowsingId"),
-    ..CookieContext::default()
+  match origin_attributes.as_str() {
+    Some(suffix) => firefox_cookie_context(Some(suffix.to_owned())),
+    None => firefox_cookie_context(Some(origin_attributes.to_string())),
   }
 }

@@ -59,11 +59,13 @@ pub use compatibility_dispatch::named::{internet_explorer, octo_browser};
 mod error;
 mod execution;
 mod header_filter;
+mod isolation;
 mod read;
 mod read_warning;
 mod request_error;
 mod selection;
 mod send_context;
+mod send_view;
 mod session;
 mod target;
 /// The `anyhow` crate, re-exported so the deprecated v0.5.9 bridge functions
@@ -81,6 +83,7 @@ pub use anyhow;
 use enums::Cookie;
 pub use error::{EngineError, Error};
 pub use execution::{AppBoundPolicy, ExecutionControl, ParseAppBoundPolicyError};
+pub use isolation::{AncestorChain, IsolationLoss};
 pub use read::{
   from_path, jar, profiles, profiles_with, read, FromPathRequest, ReadRequest, ReadResult,
   ReadWarning,
@@ -88,6 +91,7 @@ pub use read::{
 pub use request_error::RequestError;
 pub use selection::{ProfileSelection, ReportScope};
 pub use send_context::{MethodClass, ResourceKind, SendContext};
+pub use send_view::{SendOmissions, SendView};
 pub use session::SessionPolicy;
 
 /// The result type of every 0.6 job function.

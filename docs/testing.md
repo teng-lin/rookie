@@ -30,6 +30,7 @@ cargo run -p xtask --locked -- check-cfg-locations
 cargo run -p xtask --locked -- check-stage-boundary
 
 python3 -m unittest discover -s tests/e2e -p 'test_*.py' -v
+python3 -m unittest discover -s tests/isolation_corpus -p 'test_*.py' -v
 python3 -m unittest discover -s tests/release -p 'test_*.py' -v
 python3 scripts/check-doc-snippets.py
 python3 scripts/check-release.py
@@ -55,6 +56,20 @@ After `maturin develop --release --locked` in `bindings/python`:
 python -m unittest discover -s tests/python -p 'test_*.py' -v
 python scripts/check-python-stubs.py --python "$(command -v python)"
 ```
+
+`check-python-stubs.py` does two things against the *installed* extension.
+`mypy.stubtest` compares `rookie_cookies.rookie_cookies.pyi` to the compiled
+module, with the deliberate divergences held as whole messages in
+`bindings/python/stubtest-allowlist.txt`. Then mypy type-checks
+`tests/python_typing/consumer.py`, a consumer-perspective fixture no runtime
+suite executes: it is where `assert_type` pins what `send_view` returns, what
+`as_jar(allow_isolation_loss=...)` and
+`compatibility_cookies(allow_isolation_loss=...)` accept, and that
+`RookieRequestError.required` is `list[str]`. It is the Python counterpart of Node's
+`__test__/typing/consumer.ts` below. CI runs this script in the same job as
+the wheel's unit tests, on every OS and interpreter in the Python matrix, so
+runtime and stub parity are proven against the shipped artifact rather than a
+representative cell.
 
 ### Python binding coverage
 
@@ -99,7 +114,22 @@ After `npm ci --omit=optional && npm run build` in `bindings/node`
 ```console
 npm test
 npm run typecheck
+npm run test:worker-panic
 ```
+
+`npm test` includes `__test__/isolation-corpus.spec.mjs`, which drives
+`sendView`, `header`, and `jar` against `tests/isolation_corpus/corpus.json`
+(see below) using the committed base64 stores, so no Python is needed at test
+time. `test:worker-panic` needs the `test-support` feature, so build with
+`npm run build:test` when running it.
+
+`npm run typecheck` compiles `index.d.ts` **and**
+`__test__/typing/consumer.ts`, a consumer-perspective file that ava never
+runs: it asserts at compile time which options belong to which job (a
+`@ts-expect-error` on `read({ allowIsolationLoss })`, a positive
+`jar({ allowIsolationLoss })`) and exercises every `SendContextObject`
+selector. `tsc` fails on an unused `@ts-expect-error`, so a rejection that
+silently starts compiling fails the build.
 
 Ignored real-browser Rust tests (`rookie-rs/tests/e2e_chrome.rs`,
 `e2e_firefox.rs`) only run when CI (or you) seeds a profile and passes
@@ -155,6 +185,55 @@ On Windows, `cargo test` also generates a current-user **DPAPI `v10`** Cookies
 
 CLI snapshot tests use a generated Firefox database (JSON/Netscape, stderr
 logs, errors, help/version, profiles, spaces/Unicode paths).
+
+### Synthetic isolation corpus
+
+`tests/isolation_corpus/` (top level, deliberately not under `tests/e2e/`) is
+a hand-authored oracle for the isolation-safe send-selection semantics ADR
+0006 defines: `corpus.json` names five synthetic stores (`chromium_isolated`,
+`chromium_plain`, `firefox_isolated`, `firefox_unknown_attr`,
+`firefox_plain`) and a set of `SendContext` cases, each with an expected
+selected set, header, and omission counts, or a structured
+`incomplete_send_context` error with its `required` tokens. `isolation_loss_refused`
+is not a case-level expectation: it belongs to the per-store `jar` verdict,
+which pins both the refusal and the byte-identity of the opted-in output. `build_isolation_corpus.py` (stdlib
+only) materializes the stores as real Chromium `Cookies`/Firefox
+`cookies.sqlite` databases; `test_build_isolation_corpus.py` validates the
+corpus shape and checks a fresh build against the committed Node base64
+fixtures under `bindings/node/__test__/fixtures/`. It is **not** browser
+evidence: it exercises the shared Rust selection algorithm against synthetic,
+hand-computed rows, not a real browser's own cookie jar. Real-browser
+partition/container coverage is the `e2e-depth.yml` lane described below.
+
+```console
+python3 -m unittest discover -s tests/isolation_corpus -p 'test_*.py' -v
+```
+
+All four surfaces drive the same corpus from their own suites, so a selector
+that answers differently in one language fails there rather than in review:
+
+| Surface | Consumer | Run with |
+| --- | --- | --- |
+| Rust | `rookie-rs/tests/isolation_corpus.rs` (seeds via `rusqlite`) | `cargo test -p rookie-cookies --test isolation_corpus --locked` |
+| CLI | `cli/tests/isolation_corpus.rs` (drives the built binary) | `cargo test -p rookie-cookies-cli --locked` |
+| Python | `tests/python/test_isolation_corpus.py` | `python -m unittest discover -s tests/python -p 'test_*.py'` |
+| Node | `__test__/isolation-corpus.spec.mjs` (committed base64 stores) | `npm test` |
+
+Rust, Python, and Node each assert the ordered selected set, the header, the
+full omission map, and each store's `jar` verdict, plus
+`header(ctx) == send_view(ctx).header` for every case, so the renderer and the
+selection can never diverge in a binding. The Python side builds every store
+with the generator above and needs the wheel installed; the Node side reads
+the committed fixtures and needs no Python at test time.
+
+The CLI consumer is deliberately narrower, and the file says why: `send-view`
+and `header` read a *discovered* profile, so the Firefox stores are seeded as
+a real profile under an isolated `HOME` and every Firefox case is replayed
+through both subcommands, while Chromium discovery would reach the platform
+keychain or DPAPI — which a unit test must not do. The Chromium stores are
+driven through `from-path` instead, where what the CLI adds over the core's
+own corpus test is the flat-format loss policy: each store's declared `jar`
+verdict, with and without `--allow-isolation-loss`.
 
 ## Real-browser E2E (PR subset / nightly / main)
 
@@ -223,12 +302,29 @@ browser matrix:
   HTTPS top-level sites. Firefox creates the corresponding two dFPI identities.
   Rust, Python, Node, and CLI assert the browser-produced context strings and
   prove that `header(SendContext)` selects one partition without merging the
-  other. Omitting the top-level selector must fail.
+  other. Omitting the top-level selector must fail, and the reported `required`
+  tokens are compared exactly, not just the error code.
+- The same page also seeds one host of the A site through both an `A -> A`
+  frame chain and an `A -> B -> A` one, so two rows share a name, host, and
+  path and differ only in the ancestor chain that produced them: Chromium's
+  `has_cross_site_ancestor` bit and Firefox's foreign-by-ancestor `,f`
+  `partitionKey` field. The runner builds its expected send sets directly from
+  the browser's own SQLite rows -- never from the library under test -- and
+  every surface's `send_view` selection is compared against that oracle as an
+  exact set, together with the header it renders and its omission counters.
+  The contexts cover the derived ancestor chain, both explicit selectors, and
+  a first-party request re-declared cross-site, which must withhold its
+  `SameSite=Lax` rows. A browser that collapses the two chains into one row, or
+  that records no foreign-ancestor marker, fails the lane by name and version
+  rather than skipping.
 - The Firefox half also installs a checked-in test-only WebExtension into the
   disposable profile. The extension creates a real Multi-Account Container
   cookie; the runner reads its exact `originAttributes` and positive
   `userContextId` from `moz_cookies`, verifies detailed output on all four
   surfaces, and proves matching, mismatched, and missing container selectors.
+  Each surface additionally selects the container row through `send-view` and
+  repeats the call with the verbatim stored `originAttributes` suffix, which
+  must land on the same single record rather than widening the set.
 - The nightly Chromium/Firefox stress jobs retain 320 cookies across eight
   registrable test domains in each of two independent Linux profiles,
   including same-name collisions. A macOS Chrome lane repeats the work through
@@ -256,12 +352,14 @@ over loopback HTTP. The runner refuses this trust operation outside a fresh
 GitHub-hosted account and a scratch path below `RUNNER_TEMP`.
 
 HTTPS is exercised independently by the live depth lanes. The partition runner
-uses a generated certificate and three named local sites
-(`top.rookie-a.test`, `other.rookie-c.test`, and `third.rookie-b.test`) to
-produce Secure/SameSite=None CHIPS and dFPI cookies. It asserts Chromium
-`source_scheme=2`, the real source port, cross-site ancestry, two top-frame
-keys, Firefox partition keys, and send-time isolation on Rust, Python, Node,
-and CLI. The 320-cookie active-writer stress lane also uses named local HTTPS
+uses a generated certificate and four named local sites
+(`top.rookie-a.test`, `other.rookie-c.test`, `third.rookie-b.test`, and
+`nested.rookie-a.test`, which shares a registrable site with `top` so an
+`A -> B -> A` chain is expressible) to produce Secure/SameSite=None CHIPS and
+dFPI cookies. It asserts Chromium `source_scheme=2`, the real source port, both
+values of the cross-site ancestor bit, two top-frame keys, Firefox partition
+keys including the foreign-by-ancestor tuple, and send-time isolation on Rust,
+Python, Node, and CLI. The 320-cookie active-writer stress lane also uses named local HTTPS
 origins. Thus scheme/context depth and browser-product breadth are orthogonal
 contracts. Safari's HTTPS corpus additionally proves the product-specific
 cookie-acceptance boundary; it does not replace the named-site context lane.

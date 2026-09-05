@@ -5,6 +5,7 @@
 
 use crate::browser::cookie_record::DomainScope;
 use crate::common::enums::Cookie;
+use crate::isolation::is_ip;
 use crate::RequestError;
 use url::Url;
 
@@ -38,130 +39,6 @@ impl GetFilter {
     domain_matches(cookie, &self.parsed.host)
       && path_matches(cookie_path(&cookie.path), &self.parsed.path)
       && secure_matches(cookie.secure, self.parsed.https, self.parsed.trustworthy)
-  }
-}
-
-/// The one comparison space for partition identity.
-///
-/// **`Site` is (scheme, host).** This crate has no public-suffix list and does
-/// not gain one, so nothing is reduced to eTLD+1: `https://cdn.example.com`
-/// and `https://app.example.com` are *cross-site* here and same-site to a
-/// browser. That makes `SameSite=Lax`/`Strict` conservative -- it omits
-/// cookies a browser would send, never the reverse -- which is the right
-/// direction for a credential library. Adding a pinned PSL later is additive:
-/// it only widens what matches.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Site {
-  scheme: String,
-  host: String,
-}
-
-impl Site {
-  fn new(scheme: &str, host: &str) -> Self {
-    Self {
-      scheme: scheme.to_ascii_lowercase(),
-      host: host.trim_end_matches('.').to_ascii_lowercase(),
-    }
-  }
-}
-
-/// Parses a caller-supplied `http`/`https` URL into a [`Site`].
-pub(crate) fn site_from_url(raw: &str) -> Option<Site> {
-  let parsed = Url::parse(raw).ok()?;
-  if parsed.scheme() != "http" && parsed.scheme() != "https" {
-    return None;
-  }
-  let host = match parsed.host()? {
-    url::Host::Domain(domain) => domain.to_owned(),
-    url::Host::Ipv4(addr) => addr.to_string(),
-    url::Host::Ipv6(addr) => addr.to_string(),
-  };
-  Some(Site::new(parsed.scheme(), &host))
-}
-
-/// Parses Firefox's `partitionKey`, e.g. `"(https,example.com)"`.
-///
-/// Trailing fields -- a port, the foreign-ancestor bit, anything a future
-/// Firefox adds -- are **ignored for matching** and never cause a parse
-/// failure: the tuple is an open vocabulary, and `origin_attributes` retains
-/// the verbatim value for a caller who needs it. Comparing the raw tuple
-/// against a `top_level_site` URL would match nothing, so every Firefox dFPI
-/// cookie would vanish from every header.
-pub(crate) fn site_from_firefox_partition_key(raw: &str) -> Option<Site> {
-  let inner = raw.strip_prefix('(')?.strip_suffix(')')?;
-  let mut fields = inner.split(',');
-  let scheme = fields.next()?.trim();
-  let host = fields.next()?.trim();
-  if scheme.is_empty() || host.is_empty() {
-    return None;
-  }
-  if scheme != "http" && scheme != "https" {
-    return None;
-  }
-  Some(Site::new(scheme, host))
-}
-
-/// Parses Chromium's `top_frame_site_key`, which is stored either as a
-/// serialized site or as a bare origin with a port.
-pub(crate) fn site_from_chromium_top_frame_site_key(raw: &str) -> Option<Site> {
-  let trimmed = raw.trim().trim_end_matches('/');
-  if trimmed.is_empty() {
-    return None;
-  }
-  let (scheme, rest) = trimmed.split_once("://")?;
-  if scheme != "http" && scheme != "https" {
-    return None;
-  }
-  // Chromium stores this column as a serialized *site* (no port) in some
-  // versions and as a serialized *origin* (with a port) in others. A site has
-  // no port, so dropping any trailing `:digits` is what makes the two
-  // spellings compare equal rather than silently never matching.
-  let host = match rest.rsplit_once(':') {
-    Some((host, port)) if !port.is_empty() && port.bytes().all(|byte| byte.is_ascii_digit()) => {
-      host
-    }
-    _ => rest,
-  };
-  let host = host.trim_start_matches('[').trim_end_matches(']');
-  if host.is_empty() {
-    return None;
-  }
-  Some(Site::new(scheme, host))
-}
-
-/// The partition identity one stored cookie declares, if any.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum PartitionIdentity {
-  /// The row declares no partition. It is sent in every top-level context.
-  Unpartitioned,
-  /// The row declares a partition this build could normalize.
-  Site(Site),
-  /// The row declares a partition neither parser understood.
-  ///
-  /// Deliberately **not** folded into `Unpartitioned`: treating an
-  /// unrecognized key as "no partition" would send a partitioned cookie into
-  /// every context, which is precisely the merge this design exists to
-  /// prevent. It is a non-match everywhere, and the loss is counted.
-  Unparsable,
-}
-
-pub(crate) fn partition_identity(context: &crate::enums::CookieContext) -> PartitionIdentity {
-  let chromium = context
-    .top_frame_site_key
-    .as_deref()
-    .filter(|key| !key.is_empty());
-  let firefox = context
-    .partition_key
-    .as_deref()
-    .filter(|key| !key.is_empty());
-  match (chromium, firefox) {
-    (None, None) => PartitionIdentity::Unpartitioned,
-    (Some(key), _) => site_from_chromium_top_frame_site_key(key)
-      .map(PartitionIdentity::Site)
-      .unwrap_or(PartitionIdentity::Unparsable),
-    (None, Some(key)) => site_from_firefox_partition_key(key)
-      .map(PartitionIdentity::Site)
-      .unwrap_or(PartitionIdentity::Unparsable),
   }
 }
 
@@ -297,10 +174,6 @@ fn domain_matches(cookie: &Cookie, request_host: &str) -> bool {
           && request_host.as_bytes()[request_host.len() - compare.len() - 1] == b'.')
     }
   }
-}
-
-fn is_ip(host: &str) -> bool {
-  host.parse::<std::net::Ipv4Addr>().is_ok() || host.parse::<std::net::Ipv6Addr>().is_ok()
 }
 
 fn path_matches(cookie_path: &str, request_path: &str) -> bool {

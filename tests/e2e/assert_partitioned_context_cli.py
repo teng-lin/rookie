@@ -12,12 +12,24 @@ import sys
 from typing import Any
 
 from assert_partitioned_context import ContextAssertionError, validate_context_snapshot
+from cookie_manifest import ManifestError
 
 
 class CliHeaderError(RuntimeError):
-    def __init__(self, message: str, code: str | None = None):
+    def __init__(
+        self,
+        message: str,
+        code: str | None = None,
+        required: list[str] | None = None,
+    ):
         super().__init__(message)
         self.code = code
+        # The selector tokens the call is missing. The CLI defines `required`
+        # for exactly `incomplete_send_context` and `isolation_loss_refused`,
+        # drawing on the same vocabulary the Python and Node bindings expose,
+        # so a caller that already branches on one binding's `required` reads
+        # this one unchanged. `None` for every other code.
+        self.required = required
 
 
 class CliSnapshot:
@@ -39,10 +51,17 @@ class CliSnapshot:
     def detailed_cookies(self) -> list[dict[str, Any]]:
         return self.records
 
-    def header(self, context: dict[str, Any]) -> str:
+    def command_for(self, subcommand: str, context: dict[str, Any]) -> list[str]:
+        """Flatten a manifest send context onto the shared selector flags.
+
+        `header` and `send-view` take the same `SendContextArgs`, so one
+        mapping serves both and the two subcommands cannot be asked slightly
+        different questions.
+        """
+
         command = [
             str(self.cli),
-            "header",
+            subcommand,
             "--browser",
             self.browser,
             "--profile",
@@ -50,12 +69,45 @@ class CliSnapshot:
             "--url",
             str(context["url"]),
         ]
-        if context.get("top_level_site") is not None:
-            command.extend(["--top-level-site", str(context["top_level_site"])])
-        if context.get("resource") is not None:
-            command.extend(["--resource", str(context["resource"])])
-        if context.get("method") is not None:
-            command.extend(["--method", str(context["method"])])
+        for key, flag in (
+            ("top_level_site", "--top-level-site"),
+            ("resource", "--resource"),
+            ("method", "--method"),
+            ("user_context_id", "--user-context-id"),
+            ("private_browsing_id", "--private-browsing-id"),
+            ("first_party_domain", "--first-party-domain"),
+            ("gecko_view_session_context_id", "--gecko-view-session-context-id"),
+            ("origin_attributes", "--origin-attributes"),
+        ):
+            if context.get(key) is not None:
+                command.extend([flag, str(context[key])])
+        if context.get("ancestor_chain") is not None:
+            # The CLI spells the two values in kebab-case; every other surface
+            # uses the snake_case manifest spelling.
+            command.extend(
+                ["--ancestor-chain", str(context["ancestor_chain"]).replace("_", "-")]
+            )
+        return command
+
+    def send_view(self, context: dict[str, Any]) -> dict[str, Any]:
+        completed = self.run(self.command_for("send-view", context))
+        document = json.loads(completed)
+        if not isinstance(document, dict) or set(document) != {
+            "cookies",
+            "header",
+            "omitted",
+        }:
+            raise CliHeaderError(
+                f"send-view emitted an unexpected object shape: {sorted(document)!r}"
+                if isinstance(document, dict)
+                else f"send-view emitted {type(document).__name__}, expected an object"
+            )
+        return document
+
+    def header(self, context: dict[str, Any]) -> str:
+        return self.run(self.command_for("header", context)).strip()
+
+    def run(self, command: list[str]) -> str:
         completed = subprocess.run(
             command,
             check=False,
@@ -67,6 +119,7 @@ class CliSnapshot:
         if completed.returncode != 0:
             details = completed.stderr.strip() or completed.stdout.strip()
             code = None
+            required = None
             for line in reversed(details.splitlines()):
                 try:
                     error = json.loads(line)
@@ -74,9 +127,23 @@ class CliSnapshot:
                     continue
                 if isinstance(error, dict) and isinstance(error.get("code"), str):
                     code = error["code"]
+                    # An error object always carries `code` and `message`; a
+                    # code may add documented fields, and unknown keys are
+                    # ignored rather than rejected, so `required` is read
+                    # only when the code defines it.
+                    tokens = error.get("required")
+                    if isinstance(tokens, list) and all(
+                        isinstance(token, str) for token in tokens
+                    ):
+                        required = tokens
                     break
-            raise CliHeaderError(details, code)
-        return completed.stdout.strip()
+            if code == "incomplete_send_context" and not required:
+                raise CliHeaderError(
+                    f"incomplete_send_context must name the selectors it needs: {details}",
+                    code,
+                )
+            raise CliHeaderError(details, code, required)
+        return completed.stdout
 
 
 def main() -> int:
@@ -89,6 +156,7 @@ def main() -> int:
     parser.add_argument("--top-origin", required=True)
     parser.add_argument("--other-top-origin", required=True)
     parser.add_argument("--third-origin", required=True)
+    parser.add_argument("--nested-origin", required=True)
     parser.add_argument("--source-port", type=int, required=True)
     args = parser.parse_args()
 
@@ -128,12 +196,19 @@ def main() -> int:
             top_origin=args.top_origin,
             other_top_origin=args.other_top_origin,
             third_origin=args.third_origin,
+            nested_origin=args.nested_origin,
             expected_source_port=args.source_port,
+            raw_manifest=(
+                Path(os.environ["ROOKIE_E2E_CONTEXT_MANIFEST"])
+                if os.environ.get("ROOKIE_E2E_CONTEXT_MANIFEST")
+                else None
+            ),
         )
         print(json.dumps(result, ensure_ascii=False, sort_keys=True))
     except (
         ContextAssertionError,
         CliHeaderError,
+        ManifestError,
         json.JSONDecodeError,
         OSError,
         subprocess.CalledProcessError,

@@ -23,6 +23,7 @@ use rookie_cookies::report::{
 use rookie_cookies::MozillaProfile;
 use rookie_cookies::RequestError;
 use rookie_cookies::Result;
+use rookie_cookies::{AncestorChain, IsolationLoss, SendContext, SendOmissions, SendView};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -483,4 +484,247 @@ fn core_netscape_wire_shape_remains_exact() {
       rookie_cookies::version()
     )
   );
+}
+
+/// The isolation selector surface, compiled as a downstream crate would see it.
+#[test]
+fn the_send_context_selectors_are_flat_builders_that_take_owned_values() {
+  // Each string selector takes `impl Into<String>`, so both spellings work.
+  let _owned: SendContext = SendContext::url(String::from("https://example.test/"))
+    .first_party_domain(String::from("example.org"))
+    .gecko_view_session_context_id(String::from("session-7"))
+    .origin_attributes(String::from("^futureAttr=1"));
+  let _: fn(SendContext, AncestorChain) -> SendContext = SendContext::ancestor_chain;
+  let _: fn(SendContext, u32) -> SendContext = SendContext::user_context_id;
+  let _: fn(SendContext, u32) -> SendContext = SendContext::private_browsing_id;
+
+  // Every selector is set through a builder, so the whole context is one
+  // expression and no field is settable after the fact.
+  let context = SendContext::url("https://example.test/")
+    .top_level_site("https://top.example/")
+    .ancestor_chain(AncestorChain::CrossSite)
+    .user_context_id(2)
+    .private_browsing_id(0)
+    .first_party_domain("example.org")
+    .gecko_view_session_context_id("session-7")
+    .origin_attributes("^futureAttr=1");
+  assert!(format!("{context:?}").contains("ancestor_chain"));
+}
+
+#[test]
+fn the_ancestor_chain_is_a_two_state_non_exhaustive_enum_with_no_default() {
+  // No `Default`: there is no "unknown" ancestor chain a caller could pass,
+  // because an unknown chain is a property of the stored row, not the
+  // request. `#[non_exhaustive]` keeps a future third state additive.
+  assert_ne!(AncestorChain::SameSite, AncestorChain::CrossSite);
+  let copied = AncestorChain::CrossSite;
+  let _also: AncestorChain = copied;
+  assert_eq!(format!("{copied:?}"), "CrossSite");
+  match copied {
+    AncestorChain::SameSite => unreachable!(),
+    AncestorChain::CrossSite => {}
+    _ => unreachable!("non_exhaustive requires this arm downstream"),
+  }
+}
+
+#[test]
+fn send_view_is_the_borrowed_selection_and_header_renders_it() {
+  let _: for<'a> fn(&'a rookie_cookies::ReadResult, &SendContext) -> Result<SendView<'a>> =
+    rookie_cookies::ReadResult::send_view;
+  let _: fn(&rookie_cookies::ReadResult, &SendContext) -> Result<String> =
+    rookie_cookies::ReadResult::header;
+}
+
+/// Names every `SendView` accessor at its exact type.
+///
+/// This is a compile-time pin, not a runtime one: it exists so that changing
+/// an accessor's signature fails to build here, in a downstream crate, the way
+/// it would for a real consumer. The view borrows the snapshot, so `cookies()`
+/// hands back borrowed records and `to_detailed_cookies` is the owned escape.
+#[allow(dead_code)]
+fn the_send_view_accessors_keep_their_types(view: &SendView<'_>) {
+  let cookies: &[&DetailedCookie] = view.cookies();
+  let length: usize = view.len();
+  let empty: bool = view.is_empty();
+  let rendered: String = view.header();
+  let omitted: &SendOmissions = view.omitted();
+  let owned: Vec<DetailedCookie> = view.to_detailed_cookies();
+
+  assert_eq!(cookies.len(), length);
+  assert_eq!(owned.len(), length);
+  assert_eq!(empty, length == 0);
+  assert_eq!(rendered.is_empty(), empty);
+  assert_eq!(
+    omitted.total(),
+    omitted.entries().map(|(_, count)| count).sum::<u64>()
+  );
+}
+
+#[test]
+fn the_omission_reasons_are_a_fixed_ordered_vocabulary() {
+  // Bindings serialize these verbatim, so both the codes and their order are
+  // contract. All seven are always yielded, giving the serialized form a
+  // fixed shape rather than one that varies with the data.
+  let omissions = SendOmissions::default();
+  assert_eq!(
+    omissions
+      .entries()
+      .map(|(code, _)| code)
+      .collect::<Vec<&'static str>>(),
+    vec![
+      "expired",
+      "not_applicable",
+      "same_site",
+      "partition",
+      "ancestor_chain_unknown",
+      "unparsable_partition_key",
+      "origin",
+    ]
+  );
+  assert_eq!(omissions.total(), 0);
+  let _: fn(&SendOmissions) -> u64 = SendOmissions::expired;
+  let _: fn(&SendOmissions) -> u64 = SendOmissions::not_applicable;
+  let _: fn(&SendOmissions) -> u64 = SendOmissions::same_site;
+  let _: fn(&SendOmissions) -> u64 = SendOmissions::partition;
+  let _: fn(&SendOmissions) -> u64 = SendOmissions::ancestor_chain_unknown;
+  let _: fn(&SendOmissions) -> u64 = SendOmissions::unparsable_partition_key;
+  let _: fn(&SendOmissions) -> u64 = SendOmissions::origin;
+  let _: fn(&SendOmissions) -> u64 = SendOmissions::total;
+}
+
+#[test]
+fn the_jar_names_are_fail_closed_and_the_inventory_names_stay_infallible() {
+  // Which names promise send-safety is the whole contract here: `jar` can
+  // fail, `cookies` cannot, and neither was renamed.
+  let _: for<'a> fn(&'a rookie_cookies::ReadResult) -> Result<&'a [Cookie]> =
+    rookie_cookies::ReadResult::jar;
+  let _: for<'a> fn(&'a rookie_cookies::ReadResult, IsolationLoss) -> Result<&'a [Cookie]> =
+    rookie_cookies::ReadResult::jar_with;
+  let _: fn(rookie_cookies::ReadResult) -> Result<Vec<Cookie>> =
+    rookie_cookies::ReadResult::into_jar;
+  let _: fn(rookie_cookies::ReadResult, IsolationLoss) -> Result<Vec<Cookie>> =
+    rookie_cookies::ReadResult::into_jar_with;
+  let _: fn(rookie_cookies::ReadRequest) -> Result<Vec<Cookie>> = rookie_cookies::jar;
+
+  let _: for<'a> fn(&'a rookie_cookies::ReadResult) -> &'a [Cookie] =
+    rookie_cookies::ReadResult::cookies;
+  let _: fn(rookie_cookies::ReadResult) -> Vec<Cookie> = rookie_cookies::ReadResult::into_cookies;
+}
+
+#[test]
+fn isolation_loss_refuses_by_default_and_is_non_exhaustive() {
+  assert_eq!(IsolationLoss::default(), IsolationLoss::Refuse);
+  assert_ne!(IsolationLoss::Refuse, IsolationLoss::Allow);
+  let policy = IsolationLoss::Allow;
+  match policy {
+    IsolationLoss::Refuse => unreachable!(),
+    IsolationLoss::Allow => {}
+    _ => unreachable!("non_exhaustive requires this arm downstream"),
+  }
+}
+
+#[test]
+fn the_isolation_refusal_reuses_the_selector_token_vocabulary() {
+  let error = RequestError::IsolationLossRefused {
+    isolated_rows: 2,
+    required: vec!["top_level_site".to_owned(), "user_context_id".to_owned()],
+  };
+  assert_eq!(error.code(), "isolation_loss_refused");
+  assert_eq!(error.kind(), "request");
+  assert_eq!(error.browser_id(), None);
+  let message = error.to_string();
+  assert!(message.contains("top_level_site"), "{message}");
+  assert!(message.contains("allow isolation loss"), "{message}");
+}
+
+/// Seeds one SQLite file and returns its path, in a directory the caller owns.
+fn seed(dir: &std::path::Path, name: &str, sql: &str) -> PathBuf {
+  std::fs::create_dir_all(dir).expect("fixture directory");
+  let path = dir.join(name);
+  let connection = rusqlite::Connection::open(&path).expect("open fixture");
+  connection.execute_batch(sql).expect("seed fixture");
+  path
+}
+
+/// The demand-token vocabulary and the isolation warning code, observed end to
+/// end through the public API rather than asserted against a private constant.
+#[test]
+fn the_selector_tokens_and_isolation_warning_code_are_the_documented_ones() {
+  let dir = std::env::temp_dir().join(format!(
+    "rookie-public-contract-tokens-{}",
+    std::process::id()
+  ));
+
+  // One Firefox row that positively observes every isolated dimension.
+  let firefox = seed(
+    &dir,
+    "cookies.sqlite",
+    "CREATE TABLE moz_cookies (
+           host TEXT NOT NULL, path TEXT NOT NULL, isSecure INTEGER NOT NULL,
+           expiry INTEGER NOT NULL, name TEXT NOT NULL, value TEXT NOT NULL,
+           isHttpOnly INTEGER NOT NULL, sameSite INTEGER NOT NULL,
+           originAttributes TEXT NOT NULL
+         );
+         INSERT INTO moz_cookies VALUES ('.example.test', '/', 0, 4102444800,
+           'sid', 'value', 0, 0,
+           '^userContextId=3&privateBrowsingId=1&partitionKey=%28https%2Ctop.example%29\
+&firstPartyDomain=example.org&geckoViewSessionContextId=session-7&futureAttr=1');",
+  );
+  let snapshot =
+    rookie_cookies::from_path(rookie_cookies::FromPathRequest::new(&firefox).include_expired(true))
+      .expect("firefox snapshot");
+
+  let error = snapshot
+    .header(&SendContext::url("https://example.test/"))
+    .expect_err("every isolated dimension is observed");
+  assert_eq!(error.code(), "incomplete_send_context");
+  let required = match &error {
+    rookie_cookies::Error::Request(RequestError::IncompleteSendContext { required, .. }) => {
+      required.clone()
+    }
+    other => panic!("expected IncompleteSendContext, got {other:?}"),
+  };
+  assert_eq!(
+    required,
+    vec![
+      "top_level_site",
+      "user_context_id",
+      "private_browsing_id",
+      "first_party_domain",
+      "gecko_view_session_context_id",
+      "origin_attributes",
+    ],
+    "the six tokens, appended in the order the contract declares them"
+  );
+
+  // A partitioned Chromium row from a store predating the ancestor column.
+  let chromium = seed(
+    &dir,
+    "Cookies",
+    "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
+         INSERT INTO meta VALUES ('version', '24');
+         CREATE TABLE cookies (
+           host_key TEXT NOT NULL, path TEXT NOT NULL, is_secure INTEGER NOT NULL,
+           expires_utc INTEGER NOT NULL, name TEXT NOT NULL, value TEXT NOT NULL,
+           encrypted_value BLOB NOT NULL, is_httponly INTEGER NOT NULL,
+           samesite INTEGER NOT NULL, top_frame_site_key TEXT NOT NULL
+         );
+         INSERT INTO cookies VALUES ('.example.test', '/', 0, 0, 'chips', 'value',
+           X'', 0, 0, 'https://top.example');",
+  );
+  let snapshot = rookie_cookies::from_path(
+    rookie_cookies::FromPathRequest::new(&chromium)
+      .chromium_credentials(rookie_cookies::direct_path::ChromiumCredentialSource::PlaintextOnly)
+      .include_expired(true),
+  )
+  .expect("chromium snapshot");
+  assert!(
+    snapshot
+      .warnings()
+      .iter()
+      .any(|warning| warning.code() == "unknown_ancestor_chain"),
+    "a partitioned row with no ancestor bit is counted under its own code"
+  );
+
+  std::fs::remove_dir_all(&dir).ok();
 }

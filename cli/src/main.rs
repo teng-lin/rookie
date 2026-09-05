@@ -7,7 +7,7 @@ use rookie_cookies::direct_path::{
 use rookie_cookies::CancellationHandle;
 use std::path::PathBuf;
 mod args;
-use args::{Args, JobCommand};
+use args::{Args, JobCommand, SendContextArgs, SnapshotArgs};
 use rookie_cookies::common::format;
 use std::io::Write;
 
@@ -93,12 +93,37 @@ fn emit_warnings(warnings: &[rookie_cookies::ReadWarning]) {
 /// container identity, so widening them would mean inventing new columns or
 /// silently dropping the isolation `detailed` exists to keep. `detailed` is
 /// the only format that carries a `DetailedCookie`'s context.
-fn print_read_result(format: &str, result: rookie_cookies::ReadResult) {
+///
+/// Because those two formats cannot carry isolation, they route through
+/// `into_jar_with` rather than `into_cookies`: an isolated snapshot is
+/// refused (`isolation_loss_refused`) unless `--allow-isolation-loss` says
+/// the caller has decided the loss is acceptable. `detailed` loses nothing,
+/// so the flag is inert there.
+fn print_read_result(
+  format: &str,
+  result: rookie_cookies::ReadResult,
+  allow_isolation_loss: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+  let loss = isolation_loss(allow_isolation_loss);
   match format {
-    "json" => print_line_or_exit(&format::json(result.into_cookies())),
-    "netscape" => print_line_or_exit(&format::netscape(result.into_cookies())),
+    "json" => print_line_or_exit(&format::json(result.into_jar_with(loss)?)),
+    "netscape" => print_line_or_exit(&format::netscape(result.into_jar_with(loss)?)),
     "detailed" => print_line_or_exit(&format::detailed_json(result.into_detailed_cookies())),
     _ => {}
+  }
+  Ok(())
+}
+
+/// Maps `--allow-isolation-loss` to the typed policy.
+///
+/// `Refuse` is the default in the crate and here: a flat projection of an
+/// isolated snapshot is wrong in a way a successful call cannot show, so the
+/// opt-in has to be affirmative.
+fn isolation_loss(allow: bool) -> rookie_cookies::IsolationLoss {
+  if allow {
+    rookie_cookies::IsolationLoss::Allow
+  } else {
+    rookie_cookies::IsolationLoss::Refuse
   }
 }
 
@@ -120,6 +145,87 @@ fn parse_method(value: &str) -> rookie_cookies::MethodClass {
     "unsafe" => rookie_cookies::MethodClass::Unsafe,
     other => unreachable!("clap already validated --method: {other}"),
   }
+}
+
+/// Maps a validated `--ancestor-chain` value to its typed chain. See
+/// [`parse_app_bound`] for why an unreachable arm is safe here.
+fn parse_ancestor_chain(value: &str) -> rookie_cookies::AncestorChain {
+  match value {
+    "same-site" => rookie_cookies::AncestorChain::SameSite,
+    "cross-site" => rookie_cookies::AncestorChain::CrossSite,
+    other => unreachable!("clap already validated --ancestor-chain: {other}"),
+  }
+}
+
+/// Builds the one flat [`rookie_cookies::SendContext`] both `header` and
+/// `send-view` select through.
+///
+/// Every flag maps 1:1 onto a builder method, in the order ADR 0006
+/// Decision 1 lists them. A flag left off is genuinely absent, not a default:
+/// that distinction is what stops one container's cookies from answering
+/// another's request.
+fn send_context(send: SendContextArgs) -> std::io::Result<rookie_cookies::SendContext> {
+  let mut context = rookie_cookies::SendContext::url(send.url);
+  if let Some(site) = send.top_level_site {
+    context = context.top_level_site(site);
+  }
+  if let Some(resource) = send.resource {
+    context = context.resource(parse_resource(&resource));
+  }
+  if let Some(method) = send.method {
+    context = context.method(parse_method(&method));
+  }
+  if let Some(id) = send.user_context_id {
+    context = context.user_context_id(id);
+  }
+  if let Some(id) = send.private_browsing_id {
+    context = context.private_browsing_id(id);
+  }
+  if let Some(chain) = send.ancestor_chain {
+    context = context.ancestor_chain(parse_ancestor_chain(&chain));
+  }
+  if let Some(domain) = send.first_party_domain {
+    context = context.first_party_domain(domain);
+  }
+  if let Some(id) = send.gecko_view_session_context_id {
+    context = context.gecko_view_session_context_id(id);
+  }
+  if let Some(attributes) = send.origin_attributes {
+    context = context.origin_attributes(attributes);
+  }
+  if let Some(now) = send.now {
+    let now = std::time::UNIX_EPOCH
+      .checked_add(std::time::Duration::from_secs(now))
+      .ok_or_else(|| {
+        std::io::Error::new(
+          std::io::ErrorKind::InvalidInput,
+          "--now is outside this platform's SystemTime range",
+        )
+      })?;
+    context = context.now(now);
+  }
+  Ok(context)
+}
+
+/// Reads the snapshot a send-selecting subcommand renders from, emitting its
+/// read warnings to stderr first.
+fn read_snapshot(
+  snapshot: SnapshotArgs,
+) -> Result<rookie_cookies::ReadResult, Box<dyn std::error::Error>> {
+  let cancellation = install_cancel_on_signal();
+  let control = execution_control(snapshot.timeout_secs, snapshot.app_bound, cancellation);
+  let mut request = rookie_cookies::ReadRequest::browser(snapshot.browser)
+    .include_expired(snapshot.include_expired)
+    .execution(control);
+  if snapshot.include_session {
+    request = request.include_session();
+  }
+  if let Some(profile) = snapshot.profile {
+    request = request.profile(profile);
+  }
+  let result = rookie_cookies::read(request)?;
+  emit_warnings(result.warnings());
+  Ok(result)
 }
 
 /// Rejects a `--profile`/`--select` combination neither request builder can
@@ -202,6 +308,7 @@ fn run_job_command(command: JobCommand) -> Result<(), Box<dyn std::error::Error>
       include_session,
       select,
       format,
+      allow_isolation_loss,
       timeout_secs,
       app_bound,
     } => {
@@ -222,7 +329,7 @@ fn run_job_command(command: JobCommand) -> Result<(), Box<dyn std::error::Error>
       }
       let result = rookie_cookies::read(request)?;
       emit_warnings(result.warnings());
-      print_read_result(&format, result);
+      print_read_result(&format, result, allow_isolation_loss)?;
     }
     JobCommand::Profiles {
       browser,
@@ -282,6 +389,7 @@ fn run_job_command(command: JobCommand) -> Result<(), Box<dyn std::error::Error>
       browser_id,
       plaintext_only,
       domains,
+      allow_isolation_loss,
       timeout_secs,
       app_bound,
     } => {
@@ -296,17 +404,22 @@ fn run_job_command(command: JobCommand) -> Result<(), Box<dyn std::error::Error>
         )));
       }
       let cancellation = install_cancel_on_signal();
-      let control = execution_control(timeout_secs, app_bound, cancellation);
       let credentials = chromium_credential_selector(local_state_path, browser_id, plaintext_only)?;
       match domains {
         Some(domains) => {
+          // `extract_from_path` acquires detailed rows, applies the loss
+          // policy to that exact immutable row set, and only then projects it
+          // to the eight-field compatibility list. A browser write therefore
+          // cannot land between a separate policy read and output read.
           let request = path_extract_request(path, credentials)?
             .domains(Some(domains))
-            .execution(control);
+            .isolation_loss(isolation_loss(allow_isolation_loss))
+            .execution(execution_control(timeout_secs, app_bound, cancellation));
           let cookies = extract_from_path(request)?;
           print_flat_cookies(&format, cookies);
         }
         None => {
+          let control = execution_control(timeout_secs, app_bound, cancellation);
           let mut request = rookie_cookies::FromPathRequest::new(path)
             .include_expired(include_expired)
             .execution(control);
@@ -315,52 +428,20 @@ fn run_job_command(command: JobCommand) -> Result<(), Box<dyn std::error::Error>
           }
           let result = rookie_cookies::from_path(request)?;
           emit_warnings(result.warnings());
-          print_read_result(&format, result);
+          print_read_result(&format, result, allow_isolation_loss)?;
         }
       }
     }
-    JobCommand::Header {
-      url,
-      browser,
-      profile,
-      top_level_site,
-      resource,
-      method,
-      user_context_id,
-      private_browsing_id,
-      include_session,
-      timeout_secs,
-      app_bound,
-    } => {
-      let cancellation = install_cancel_on_signal();
-      let control = execution_control(timeout_secs, app_bound, cancellation);
-      let mut request = rookie_cookies::ReadRequest::browser(browser).execution(control);
-      if include_session {
-        request = request.include_session();
-      }
-      if let Some(profile) = profile {
-        request = request.profile(profile);
-      }
-      let result = rookie_cookies::read(request)?;
-      emit_warnings(result.warnings());
-
-      let mut context = rookie_cookies::SendContext::url(url);
-      if let Some(site) = top_level_site {
-        context = context.top_level_site(site);
-      }
-      if let Some(resource) = resource {
-        context = context.resource(parse_resource(&resource));
-      }
-      if let Some(method) = method {
-        context = context.method(parse_method(&method));
-      }
-      if let Some(id) = user_context_id {
-        context = context.user_context_id(id);
-      }
-      if let Some(id) = private_browsing_id {
-        context = context.private_browsing_id(id);
-      }
+    JobCommand::Header { send, snapshot } => {
+      let context = send_context(send)?;
+      let result = read_snapshot(snapshot)?;
       print_line_or_exit(&result.header(&context)?);
+    }
+    JobCommand::SendView { send, snapshot } => {
+      let context = send_context(send)?;
+      let result = read_snapshot(snapshot)?;
+      let view = result.send_view(&context)?;
+      print_line_or_exit(&serde_json::to_string_pretty(&send_view_document(&view))?);
     }
     JobCommand::Browsers => {
       let browsers = rookie_cookies::supported_browsers()?;
@@ -423,15 +504,66 @@ fn path_extract_request(
   })
 }
 
+/// The `send-view` JSON object: the selected records, the header they render
+/// to, and the full omission table.
+///
+/// `cookies` is the same serialization `--format detailed` emits, so a
+/// consumer can hand a `send-view` record to anything that already reads a
+/// detailed row. `omitted` carries **every** reason in
+/// `SendOmissions::entries()` order, zeroes included -- a fixed shape is what
+/// lets a consumer index it without first checking which keys exist, and the
+/// order is the declared serialization order, not the attribution order rows
+/// are evaluated in (ADR 0006 Decision 2).
+fn send_view_document(view: &rookie_cookies::SendView<'_>) -> serde_json::Value {
+  let omitted = view
+    .omitted()
+    .entries()
+    .map(|(reason, count)| (reason.to_owned(), serde_json::Value::from(count)))
+    .collect::<serde_json::Map<_, _>>();
+  serde_json::json!({
+    "cookies": view.to_detailed_cookies(),
+    "header": view.header(),
+    "omitted": omitted,
+  })
+}
+
+/// The selector tokens the two send-selection failures name.
+///
+/// ADR 0006 Decision 5 gives `incomplete_send_context` and
+/// `isolation_loss_refused` one shared vocabulary, so a caller who branches
+/// on one error's `required` already knows the other's.
+fn selector_required(error: &rookie_cookies::Error) -> Option<&[String]> {
+  match error {
+    rookie_cookies::Error::Request(rookie_cookies::RequestError::IncompleteSendContext {
+      required,
+      ..
+    })
+    | rookie_cookies::Error::Request(rookie_cookies::RequestError::IsolationLossRefused {
+      required,
+      ..
+    }) => Some(required),
+    _ => None,
+  }
+}
+
 /// Preserve the human diagnostic while exposing typed library failures to
 /// scripts through a stable JSON code.
+///
+/// Every error object carries `code` and `message`; a given `code` may define
+/// further documented fields, and a consumer must ignore keys it does not
+/// know rather than reject them (ADR 0006 Decision 6). `required` is the
+/// first such field, defined for exactly the two selector codes.
 fn render_cli_error(error: &(dyn std::error::Error + 'static)) -> String {
   match error.downcast_ref::<rookie_cookies::Error>() {
-    Some(error) => serde_json::json!({
-      "code": error.code(),
-      "message": error.to_string(),
-    })
-    .to_string(),
+    Some(error) => {
+      let mut document = serde_json::Map::new();
+      document.insert("code".to_owned(), error.code().into());
+      document.insert("message".to_owned(), error.to_string().into());
+      if let Some(required) = selector_required(error) {
+        document.insert("required".to_owned(), required.into());
+      }
+      serde_json::Value::Object(document).to_string()
+    }
     None => error.to_string(),
   }
 }
@@ -488,7 +620,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     command
       .error(
         ErrorKind::MissingSubcommand,
-        "a subcommand is required (read, from-path, header, report, profiles, browsers)",
+        "a subcommand is required (read, from-path, header, send-view, report, profiles, browsers)",
       )
       .exit();
   };
@@ -518,6 +650,35 @@ mod tests {
     }
   }
 
+  fn send_args(now: Option<u64>) -> SendContextArgs {
+    SendContextArgs {
+      url: "https://example.test/".to_owned(),
+      top_level_site: None,
+      resource: None,
+      method: None,
+      user_context_id: None,
+      private_browsing_id: None,
+      ancestor_chain: None,
+      first_party_domain: None,
+      gecko_view_session_context_id: None,
+      origin_attributes: None,
+      now,
+    }
+  }
+
+  #[test]
+  fn send_context_rejects_a_time_outside_system_time_range() {
+    let error = send_context(send_args(Some(u64::MAX)))
+      .expect_err("large --now must be an ordinary error, not a SystemTime addition panic");
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    assert!(error.to_string().contains("--now"));
+  }
+
+  #[test]
+  fn send_context_preserves_representable_now() {
+    send_context(send_args(Some(0))).expect("the Unix epoch is representable");
+  }
+
   #[test]
   fn typed_library_errors_render_a_machine_readable_code() {
     let error = rookie_cookies::Error::from(rookie_cookies::RequestError::MissingBrowser);
@@ -525,5 +686,43 @@ mod tests {
     let document: serde_json::Value = serde_json::from_str(&rendered).expect("JSON error");
     assert_eq!(document["code"], "missing_browser");
     assert_eq!(document["message"], error.to_string());
+    // `required` belongs to the two selector codes only. Emitting it
+    // everywhere would tell a consumer that every failure names selectors,
+    // when most name nothing of the sort.
+    assert_eq!(
+      document.as_object().expect("error object").len(),
+      2,
+      "a non-selector code carries only code and message: {document}"
+    );
+    assert!(document.get("required").is_none(), "{document}");
+  }
+
+  #[test]
+  fn the_two_selector_errors_render_their_required_tokens() {
+    for error in [
+      rookie_cookies::RequestError::IncompleteSendContext {
+        display: "https://example.com/".to_owned(),
+        required: vec!["top_level_site".to_owned(), "user_context_id".to_owned()],
+      },
+      rookie_cookies::RequestError::IsolationLossRefused {
+        isolated_rows: 3,
+        required: vec!["top_level_site".to_owned(), "user_context_id".to_owned()],
+      },
+    ] {
+      let error = rookie_cookies::Error::from(error);
+      let rendered = render_cli_error(&error);
+      let document: serde_json::Value = serde_json::from_str(&rendered).expect("JSON error");
+      assert_eq!(
+        document.as_object().expect("error object").len(),
+        3,
+        "a selector code adds exactly one documented field: {document}"
+      );
+      assert_eq!(document["code"], error.code());
+      assert_eq!(
+        document["required"],
+        serde_json::json!(["top_level_site", "user_context_id"]),
+        "{document}"
+      );
+    }
   }
 }
