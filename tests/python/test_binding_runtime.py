@@ -312,44 +312,64 @@ class SameInterpreterConcurrencyTest(unittest.TestCase):
             # `test_parallel_extractions_do_not_interfere` is for; here the
             # question is whether the binding serializes, and four readers on
             # one file answers it without seeding four large databases.
-            store, serial = _sized_store(Path(temp))
+            store, _ = _sized_store(Path(temp))
 
-            barrier = threading.Barrier(workers)
-            failures: list[BaseException] = []
-
-            def extract(index: int) -> None:
-                try:
-                    barrier.wait(timeout=30)
+            def serial_batch() -> float:
+                started = time.perf_counter()
+                for _ in range(workers):
                     rookie_cookies.from_path(str(store))
-                except BaseException as error:  # noqa: BLE001 - re-raised below
-                    failures.append(error)
+                return time.perf_counter() - started
 
-            threads = [
-                threading.Thread(target=extract, args=(index,)) for index in range(workers)
-            ]
-            started = time.perf_counter()
-            for thread in threads:
-                thread.start()
-            for thread in threads:
-                thread.join(timeout=120)
-            parallel = time.perf_counter() - started
+            def parallel_batch() -> tuple[
+                float, list[BaseException], list[threading.Thread]
+            ]:
+                barrier = threading.Barrier(workers)
+                failures: list[BaseException] = []
 
-        # Asserted before any instrumentation check, so a coverage lane still
-        # runs four concurrent extractions over one store and still fails on a
-        # crash, an exception, or a thread that never finished. Only the
-        # wall-clock inference below is stood down there.
-        self.assertEqual(failures, [])
-        self.assertFalse([thread for thread in threads if thread.is_alive()])
+                def extract() -> None:
+                    try:
+                        barrier.wait(timeout=30)
+                        rookie_cookies.from_path(str(store))
+                    except BaseException as error:  # noqa: BLE001 - re-raised below
+                        failures.append(error)
+
+                threads = [threading.Thread(target=extract) for _ in range(workers)]
+                started = time.perf_counter()
+                for thread in threads:
+                    thread.start()
+                for thread in threads:
+                    thread.join(timeout=120)
+                return time.perf_counter() - started, failures, threads
+
+            # Coverage still exercises the concurrent call and all correctness
+            # assertions, but skips repeated wall-clock sampling for the same
+            # reason it skips the scaling inference below.
+            attempts = 1 if _COVERAGE_INSTRUMENTED else 3
+            measurements: list[tuple[float, float]] = []
+            for _ in range(attempts):
+                serial = serial_batch()
+                parallel, failures, threads = parallel_batch()
+
+                # Assert each batch before collecting another measurement, so
+                # a crash, exception, or wedged worker is never averaged away.
+                self.assertEqual(failures, [])
+                self.assertFalse([thread for thread in threads if thread.is_alive()])
+                measurements.append((serial, parallel))
+
         if _COVERAGE_INSTRUMENTED:
             self.skipTest(_INSTRUMENTED_SKIP_REASON)
-        # Two cores are enough to beat a fully serial run by a clear margin;
-        # the bound is loose so a busy runner does not turn a real overlap into
-        # a red build, while a fully serialized binding still fails it.
+
+        # Compare like-for-like four-call batches, not four times the one-call
+        # sizing probe: shared-host load can make those unrelated samples
+        # differ enough to manufacture a failure. Three paired samples let one
+        # uncontended run demonstrate overlap while a serialized binding still
+        # pays the complete serial cost every time (plus thread overhead).
+        best_ratio = min(parallel / serial for serial, parallel in measurements)
         self.assertLess(
-            parallel,
-            workers * serial * 0.85,
-            f"{workers} extractions took {parallel:.3f}s against a {serial:.3f}s "
-            "serial baseline, which is what fully serialized work looks like",
+            best_ratio,
+            0.90,
+            f"best parallel/serial ratio was {best_ratio:.3f} across "
+            f"{measurements!r}; fully serialized work has a ratio of at least 1",
         )
 
     def test_parallel_extractions_do_not_interfere(self) -> None:

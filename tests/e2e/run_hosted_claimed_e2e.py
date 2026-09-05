@@ -650,12 +650,13 @@ def chromium_automation_user_data(
     """Select a fresh browser-launch root without weakening discovery checks."""
 
     # Chromium 136+ products may suppress remote debugging when --user-data-dir
-    # names their computed default root. Edge and Windows Yandex can enforce
-    # that boundary; launch them in the separately supplied disposable scratch
-    # root, then stage stopped output into the disposable registry root.
+    # names their computed default root. Edge and Yandex can enforce that
+    # boundary; launch them in the separately supplied disposable scratch root,
+    # then stage stopped output into the disposable registry root.
     if (browser, platform) in {
         ("edge", "linux"),
         ("edge", "windows"),
+        ("yandex", "macos"),
         ("yandex", "windows"),
     }:
         return requested
@@ -670,9 +671,11 @@ def chromium_automation_user_data_candidates(
     primary = chromium_automation_user_data(browser, platform, requested, registry_root)
     # Linux Edge varies between releases: some require a non-default root for
     # DevTools, while others only complete startup navigation at their isolated
-    # default root. Both are empty disposable paths, and exact extraction after
+    # default root. macOS Yandex has also intermittently acknowledged native
+    # navigation without persisting its cookie at one launch root. In both
+    # cases the alternate is bounded and fresh, and exact extraction after
     # shutdown remains the success oracle.
-    if (browser, platform) == ("edge", "linux"):
+    if (browser, platform) in {("edge", "linux"), ("yandex", "macos")}:
         return [primary, registry_root]
     return [primary]
 

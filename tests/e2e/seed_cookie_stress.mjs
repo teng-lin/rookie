@@ -67,7 +67,14 @@ const hosts = Array.from(
   { length: 8 },
   (_, index) => `seed.rookie-${index}.test`,
 );
-const hostRules = hosts.map((host) => `MAP ${host} 127.0.0.1`).join(",");
+// Churn must pressure the same live database without modifying the 320 rows
+// whose exact values and identities are pinned by each manifest.
+const churnHosts = Array.from(
+  { length: 8 },
+  (_, index) => `churn.rookie-${index}.test`,
+);
+const servedHosts = [...hosts, ...churnHosts];
+const hostRules = servedHosts.map((host) => `MAP ${host} 127.0.0.1`).join(",");
 const timeout = Number(process.env.ROOKIE_E2E_PLAYWRIGHT_TIMEOUT_MS || 120000);
 let browserType;
 let launchOptions;
@@ -112,7 +119,7 @@ if (engine === "chromium") {
     ignoreHTTPSErrors: true,
     timeout,
     firefoxUserPrefs: {
-      "network.dns.localDomains": hosts.join(","),
+      "network.dns.localDomains": servedHosts.join(","),
     },
   };
 }
@@ -226,44 +233,32 @@ function acknowledgement({
   };
 }
 
-async function startWriteChurn(context, manifest) {
-  const states = manifest.expected.unfiltered_flat
-    .filter(({ name }) => /^stress_[0-7]_0$/.test(name))
-    .map(({ domain, expires, value }) => ({
-      host: domain.replace(/^\./, ""),
-      expires,
-      value,
-    }))
-    .sort((left, right) => left.host.localeCompare(right.host));
-  if (states.length !== hosts.length) {
-    throw new Error(
-      `write churn expected ${hosts.length} stable rows, got ${states.length}`,
-    );
-  }
+async function startWriteChurn(context) {
   const churnPage = await context.newPage();
   let active = true;
   let requests = 0;
+  let tick = 0;
   let churnError;
   const work = (async () => {
     while (active) {
-      for (const state of states) {
+      for (const host of churnHosts) {
         if (!active) break;
-        const target = new URL(`https://${state.host}:${port}/stress/churn`);
-        target.searchParams.set("value", state.value);
-        target.searchParams.set("expiry", String(state.expires));
+        const target = new URL(`https://${host}:${port}/stress/churn`);
+        target.searchParams.set("tick", String(tick));
         await churnPage.goto(target.href, {
           waitUntil: "domcontentloaded",
           timeout,
         });
         requests += 1;
       }
+      tick += 1;
     }
   })().catch((error) => {
     churnError = error;
     active = false;
   });
   const warmupDeadline = Date.now() + timeout;
-  while (requests < states.length && churnError === undefined) {
+  while (requests < churnHosts.length && churnError === undefined) {
     if (Date.now() >= warmupDeadline) {
       active = false;
       await churnPage.close();
@@ -426,6 +421,9 @@ async function navigateAndCapture(
       user_agent: await page.evaluate(() => navigator.userAgent),
     },
     domain_filter: hosts,
+    // The separate churn rows prove ongoing browser writes but are not part of
+    // the exact-set corpus every public surface must return unchanged.
+    verification_scope: { cookie_domains: hosts },
     identities: {
       filtered_flat: ["domain", "path", "name"],
       unfiltered_flat: ["domain", "path", "name"],
@@ -594,7 +592,7 @@ try {
     const databasePath = await databaseForProfile();
     const browserVersion = initial.browser.version;
     let currentManifest = initial;
-    let churn = await startWriteChurn(context, initial);
+    let churn = await startWriteChurn(context);
     await writeControl(
       "ack-0.json",
       acknowledgement({
@@ -668,7 +666,7 @@ try {
         nextManifest,
       );
       currentManifest = captured;
-      churn = await startWriteChurn(context, captured);
+      churn = await startWriteChurn(context);
       await writeControl(
         `ack-${sequence}.json`,
         acknowledgement({
