@@ -117,20 +117,28 @@ class HostedBrowserRunnerTests(unittest.TestCase):
                 hosted.find_chromium_db(user_data, name="rookie_ci"), legacy
             )
 
-    def test_windows_yandex_uses_a_non_default_disposable_launch_root(self) -> None:
+    def test_yandex_uses_bounded_disposable_launch_roots(self) -> None:
         requested = Path(r"D:\a\_temp\rookie-ci\yandex")
         registry = Path(r"D:\a\_temp\sandbox\Yandex\User Data")
+        for platform in ("windows", "macos"):
+            with self.subTest(platform=platform):
+                self.assertEqual(
+                    hosted.chromium_automation_user_data(
+                        "yandex", platform, requested, registry
+                    ),
+                    requested,
+                )
         self.assertEqual(
-            hosted.chromium_automation_user_data(
+            hosted.chromium_automation_user_data_candidates(
                 "yandex", "windows", requested, registry
             ),
-            requested,
+            [requested],
         )
         self.assertEqual(
-            hosted.chromium_automation_user_data(
+            hosted.chromium_automation_user_data_candidates(
                 "yandex", "macos", requested, registry
             ),
-            registry,
+            [requested, registry],
         )
 
     def test_edge_uses_bounded_disposable_launch_roots(self) -> None:

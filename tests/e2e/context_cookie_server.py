@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-from email.utils import formatdate
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
@@ -26,7 +25,11 @@ ALLOWED_THIRD_HOST = "third.rookie-b.test"
 ALLOWED_NESTED_HOST = "nested.rookie-a.test"
 ANCESTOR_CHAINS = frozenset({"same_site", "cross_site"})
 STRESS_HOST_PATTERN = re.compile(r"seed\.rookie-(?P<index>[0-7])\.test\Z")
+# Write churn has its own registrable domains so it exercises a live browser
+# database without rewriting any identity in the exact-set oracle.
+CHURN_HOST_PATTERN = re.compile(r"churn\.rookie-(?P<index>[0-7])\.test\Z")
 MAX_STRESS_COOKIES_PER_HOST = 64
+MAX_CHURN_TICK = 1_000_000_000
 
 
 class ContextCookieServer(ThreadingHTTPServer):
@@ -406,35 +409,29 @@ addEventListener("message", (event) => {{
             return
 
         if parsed.path == "/stress/churn":
-            if stress_match is None:
-                self.send_body(HTTPStatus.BAD_REQUEST, "invalid stress host\n")
+            churn_match = CHURN_HOST_PATTERN.fullmatch(host)
+            if churn_match is None:
+                self.send_body(HTTPStatus.BAD_REQUEST, "invalid churn host\n")
                 return
             query = parse_qs(parsed.query)
-            host_index = int(stress_match.group("index"))
-            value = query.get("value", [""])[0]
-            valid_value = value == f"seed-{host_index}-0" or re.fullmatch(
-                r"updated-[0-9]+", value
-            )
+            host_index = int(churn_match.group("index"))
             try:
-                expiry = int(query.get("expiry", [""])[0])
+                tick = int(query.get("tick", [""])[0])
             except ValueError:
-                expiry = 0
-            if not valid_value or expiry <= 0:
-                self.send_body(HTTPStatus.BAD_REQUEST, "invalid stress churn state\n")
+                tick = -1
+            if not 0 <= tick <= MAX_CHURN_TICK:
+                self.send_body(HTTPStatus.BAD_REQUEST, "invalid churn tick\n")
                 return
+            # A new value on every request prevents the browser from treating
+            # the Set-Cookie write as an idempotent no-op.
             self.send_body(
                 HTTPStatus.OK,
-                json.dumps({"host_index": host_index, "churned": True}),
+                json.dumps({"host_index": host_index, "tick": tick, "churned": True}),
                 content_type="application/json",
                 cookies=(
-                    f"stress_{host_index}_0={value}; Secure; HttpOnly; "
-                    f"SameSite=Lax; Path=/; Expires={formatdate(expiry, usegmt=True)}",
+                    f"churn_{host_index}=churn-{host_index}-{tick}; Secure; HttpOnly; "
+                    "SameSite=Lax; Path=/; Max-Age=1209600",
                 ),
-                # Chromium and Firefox compensate Expires for server clock skew
-                # using Date. Around a one-second boundary that can turn this
-                # fixed timestamp into expiry - 1 and invalidate the exact
-                # manifest while the cookie is otherwise unchanged.
-                send_date=False,
             )
             return
 

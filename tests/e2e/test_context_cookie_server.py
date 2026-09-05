@@ -257,22 +257,28 @@ class ContextCookieServerTests(unittest.TestCase):
             {"host_index": 5, "round": 7, "deleted_index": 8},
         )
 
-    def test_stress_churn_rewrites_only_the_stable_cookie_state(self) -> None:
+    def test_stress_churn_uses_a_separate_identity_and_domain(self) -> None:
         status, headers, body = self.request(
-            "seed.rookie-2.test",
-            "/stress/churn?value=seed-2-0&expiry=4102444800",
+            "churn.rookie-2.test",
+            "/stress/churn?tick=7",
         )
         self.assertEqual(status, 200)
         cookies = [value for name, value in headers if name.lower() == "set-cookie"]
         self.assertEqual(len(cookies), 1)
-        self.assertTrue(cookies[0].startswith("stress_2_0=seed-2-0;"))
-        self.assertIn("Expires=Fri, 01 Jan 2100 00:00:00 GMT", cookies[0])
-        self.assertNotIn("date", {name.lower() for name, _ in headers})
-        self.assertEqual(json.loads(body), {"host_index": 2, "churned": True})
+        self.assertTrue(cookies[0].startswith("churn_2=churn-2-7;"))
+        self.assertIn("Max-Age=1209600", cookies[0])
+        self.assertEqual(
+            json.loads(body), {"host_index": 2, "tick": 7, "churned": True}
+        )
 
         status, _, _ = self.request(
             "seed.rookie-2.test",
-            "/stress/churn?value=seed-7-0&expiry=4102444800",
+            "/stress/churn?tick=7",
+        )
+        self.assertEqual(status, 400)
+        status, _, _ = self.request(
+            "churn.rookie-2.test",
+            f"/stress/churn?tick={SERVER.MAX_CHURN_TICK + 1}",
         )
         self.assertEqual(status, 400)
 

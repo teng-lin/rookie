@@ -48,7 +48,11 @@ def require_ci_sandbox(path: Path) -> Path:
 def generate_certificate(sandbox: Path) -> tuple[Path, Path]:
     certificate = sandbox / "stress-cert.pem"
     private_key = sandbox / "stress-key.pem"
-    names = ",".join(f"DNS:seed.rookie-{index}.test" for index in range(8))
+    names = ",".join(
+        f"DNS:{host}"
+        for index in range(8)
+        for host in (f"seed.rookie-{index}.test", f"churn.rookie-{index}.test")
+    )
     subprocess.run(
         [
             "openssl",
@@ -228,7 +232,8 @@ def raw_write_generation(database: Path, engine: str) -> int:
     )
     try:
         row = connection.execute(
-            f"select max({column}) from {table} where name like 'stress_%'"
+            f"select max({column}) from {table} "
+            "where name like 'stress_%' or name like 'churn_%'"
         ).fetchone()
     finally:
         connection.close()
