@@ -34,6 +34,22 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      - name: Scope the history scan to the checked-out ref
+        run: |
+          set -euo pipefail
+          # gitleaks-action supplies an explicit range for push and PR events,
+          # but scheduled/workflow_dispatch scans use `git log --all`. A
+          # depth-zero checkout fetches every remote branch, so an unmerged
+          # branch finding can otherwise make main's nightly scan fail. HEAD
+          # gets its own local scan ref before those tracking refs are removed,
+          # retaining its complete ancestry even after a detached checkout;
+          # tags remain as additional committed release roots.
+          git update-ref refs/heads/gitleaks-scan "$GITHUB_SHA"
+          git remote set-head origin --delete || true
+          git for-each-ref --format='delete %(refname)' refs/remotes/origin \
+            | git update-ref --stdin
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git rev-parse refs/heads/gitleaks-scan)" = "$GITHUB_SHA"
       - name: Scan committed history
         uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
         env:

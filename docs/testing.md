@@ -233,8 +233,9 @@ browser matrix:
   registrable test domains in each of two independent Linux profiles,
   including same-name collisions. A macOS Chrome lane repeats the work through
   the real Keychain route. They keep the browser open through three
-  add/update/delete rounds while a Set-Cookie loop advances the raw database
-  write generation, launch concurrent extractor processes on every public
+  add/update/delete rounds while a Set-Cookie loop on eight separate churn
+  domains advances the raw database write generation without rewriting the
+  exact-set oracle, launch concurrent extractor processes on every public
   surface, enforce the exact detailed manifest after every round, and compare
   the final closed snapshot. A locked rollback-journal copy must produce typed
   timeout and in-flight cancellation failures, then recover to the exact set
